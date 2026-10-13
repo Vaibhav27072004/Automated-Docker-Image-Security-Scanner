@@ -201,6 +201,6 @@ a bug worth reporting.
 
 ---
 
-- 📋 [Open an Issue](https://github.com/Vaibhav27072004/docker-security-scanner/issues)
+- 📋 [Open an Issue](https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/issues)
 - 📖 [Architecture Docs](../ARCHITECTURE.md)
-- 💬 [Discussions](https://github.com/Vaibhav27072004/docker-security-scanner/discussions)
+- 💬 [Discussions](https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/discussions)

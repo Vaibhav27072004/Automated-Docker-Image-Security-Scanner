@@ -57,12 +57,12 @@ setup(
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Vaibhav27072004/docker-security-scanner",
+    url="https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner",
     project_urls={
-        "Source": "https://github.com/Vaibhav27072004/docker-security-scanner",
-        "Bug Tracker": "https://github.com/Vaibhav27072004/docker-security-scanner/issues",
+        "Source": "https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner",
+        "Bug Tracker": "https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/issues",
         "Documentation": (
-            "https://github.com/Vaibhav27072004/docker-security-scanner/tree/main/docs"
+            "https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/tree/main/docs"
         ),
     },
     classifiers=[

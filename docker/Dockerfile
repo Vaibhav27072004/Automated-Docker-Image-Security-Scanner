@@ -105,5 +105,5 @@ CMD ["--help"]
 # ── Labels ────────────────────────────────────────────────────────────────────
 LABEL org.opencontainers.image.title="Docker Security Scanner" \
       org.opencontainers.image.description="Automated Docker image security scanner with Trivy, Hadolint, and Gitleaks" \
-      org.opencontainers.image.source="https://github.com/Vaibhav27072004/docker-security-scanner" \
+      org.opencontainers.image.source="https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner" \
       org.opencontainers.image.licenses="MIT"

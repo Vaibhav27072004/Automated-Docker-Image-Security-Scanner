@@ -17,8 +17,8 @@ Thank you for your interest in contributing! 🎉
 ## Development Setup
 
 ```bash
-git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
-cd docker-security-scanner
+git clone https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner.git
+cd Automated-Docker-Image-Security-Scanner
 
 python -m venv .venv
 source .venv/bin/activate

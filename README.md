@@ -2,7 +2,7 @@
   <h1>🔒 Docker Image Security Scanner</h1>
   <p><strong>A build-time security gate for container images: CVEs, hardcoded secrets,<br>Dockerfile misconfigurations and SBOMs, behind one policy that fails closed.</strong></p>
 
-  [![Build Status](https://github.com/Vaibhav27072004/docker-security-scanner/actions/workflows/security-scan.yml/badge.svg)](https://github.com/Vaibhav27072004/docker-security-scanner/actions/workflows/security-scan.yml)
+  [![Build Status](https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/actions/workflows/security-scan.yml/badge.svg)](https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner/actions/workflows/security-scan.yml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
   [![Coverage](https://img.shields.io/badge/coverage%20gate-85%25-brightgreen)](tests/)
   [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
@@ -101,8 +101,8 @@ split the scanner exists to make visible.
 ### 1. Installation
 
 ```bash
-git clone https://github.com/Vaibhav27072004/docker-security-scanner.git && \
-  cd docker-security-scanner && \
+git clone https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner.git && \
+  cd Automated-Docker-Image-Security-Scanner && \
   pip install -r requirements.txt && \
   pip install -e .
 ```
@@ -436,8 +436,8 @@ curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleak
 
 **Step 2: Install Python package**
 ```bash
-git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
-cd docker-security-scanner
+git clone https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner.git
+cd Automated-Docker-Image-Security-Scanner
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -1191,8 +1191,8 @@ See [GitHub Actions Integration](#-github-actions-integration--automated-securit
 
 ### Option 2: Learn From Examples
 ```bash
-git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
-cd docker-security-scanner/examples
+git clone https://github.com/Vaibhav27072004/Automated-Docker-Image-Security-Scanner.git
+cd Automated-Docker-Image-Security-Scanner/examples
 # See what bad looks like
 docker build -t vuln-app:latest vulnerable-app/
 docker-scan image vuln-app:latest
