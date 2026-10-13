@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ─── Black ───────────────────────────────────────────────────────────────────
+# line-length is shared with flake8 and isort below. Keep all three in sync:
+# divergent values are why `black --check` and `flake8` can fight each other.
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+# ─── isort ───────────────────────────────────────────────────────────────────
+# profile = "black" is required, otherwise isort and black disagree on how
+# multi-line imports are wrapped and the two CI steps can never both pass.
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["docker_security_scanner"]
+
+# ─── mypy ────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+no_strict_optional = true
+warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+
+# ─── pytest ──────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    "error::DeprecationWarning:docker_security_scanner.*",
+]
+
+# ─── coverage ────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["docker_security_scanner"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

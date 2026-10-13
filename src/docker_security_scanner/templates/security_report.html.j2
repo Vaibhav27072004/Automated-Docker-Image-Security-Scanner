@@ -1,30 +1,3 @@
-"""
-report_generator.py — Multi-format security report generation.
-
-Generates HTML dashboards, JSON structured reports, and Markdown summaries
-from aggregated scanner results. Designed to integrate with GitHub Actions
-PR comments and artifact uploads.
-"""
-
-from __future__ import annotations
-
-import json
-import logging
-from datetime import datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-from .utils import ScannerConfig, ensure_dir, write_json
-
-if TYPE_CHECKING:
-    from .scanner import AggregatedResult
-
-logger = logging.getLogger("docker_security_scanner.report")
-
-# ─── Inline HTML template (no external file needed) ───────────────────────────
-_HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -48,6 +21,7 @@ _HTML_TEMPLATE = """\
     .badge-HIGH { background: var(--high); }
     .badge-MEDIUM { background: var(--medium); color: #000; }
     .badge-LOW { background: var(--low); color: #000; }
+    .badge-UNKNOWN { background: var(--border); }
     .badge-PASS { background: var(--pass); }
     .badge-FAIL { background: var(--critical); }
     .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
@@ -70,6 +44,11 @@ _HTML_TEMPLATE = """\
                   border-radius: 8px; margin-bottom: 2rem; font-weight: 600; }
     .status-bar.pass { background: #1a3a1f; border: 1px solid var(--pass); }
     .status-bar.fail { background: #3a1a1a; border: 1px solid var(--critical); }
+    .alert { background: #3a2a1a; border: 1px solid var(--high); border-radius: 8px;
+             padding: 1rem 1.5rem; margin-bottom: 2rem; }
+    .alert h3 { font-size: 1rem; margin-bottom: 0.5rem; color: var(--high); }
+    .alert ul { margin-left: 1.2rem; font-size: 0.9rem; }
+    .note { color: var(--muted); font-size: 0.8rem; margin-top: 0.5rem; }
   </style>
 </head>
 <body>
@@ -80,8 +59,27 @@ _HTML_TEMPLATE = """\
     <span class="badge {{ 'badge-PASS' if result.passed else 'badge-FAIL' }}">
       {{ '✓ PASSED' if result.passed else '✗ FAILED' }}
     </span>
-    <span>Overall Security Status</span>
+    <span>Security policy verdict</span>
   </div>
+
+  {% if result.policy.violations %}
+  <div class="alert">
+    <h3>Policy violations</h3>
+    <ul>
+      {% for v in result.policy.violations %}<li>{{ v }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if result.policy.scanner_errors %}
+  <div class="alert">
+    <h3>⚠️ Scanners that did not run</h3>
+    <ul>
+      {% for e in result.policy.scanner_errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+    <p class="note">Zero findings from a scanner that failed is not evidence of a clean image.</p>
+  </div>
+  {% endif %}
 
   <div class="cards">
     <div class="card critical"><div class="num">{{ result.trivy.critical_count }}</div><div class="label">Critical CVEs</div></div>
@@ -93,14 +91,16 @@ _HTML_TEMPLATE = """\
   </div>
 
   <div class="section">
-    <h2>🛡️ Vulnerability Findings (Top 20)</h2>
-    {% if result.trivy.vulnerabilities %}
+    <h2>🛡️ Vulnerability Findings (Top {{ vuln_limit }})</h2>
+    {% if not result.trivy.ran %}
+    <p style="color: var(--high)">⚠️ Trivy did not run: {{ result.trivy.error }}</p>
+    {% elif result.trivy.vulnerabilities %}
     <table>
       <thead><tr><th>CVE ID</th><th>Severity</th><th>Package</th><th>Installed</th><th>Fixed</th><th>CVSS</th></tr></thead>
       <tbody>
-        {% for v in result.trivy.vulnerabilities[:20] %}
+        {% for v in result.trivy.vulnerabilities[:vuln_limit] %}
         <tr>
-          <td><a href="{{ v.nvd_url }}" target="_blank">{{ v.id }}</a></td>
+          <td><a href="{{ v.nvd_url }}" target="_blank" rel="noopener noreferrer">{{ v.id }}</a></td>
           <td><span class="badge badge-{{ v.severity }}">{{ v.severity }}</span></td>
           <td>{{ v.package_name }}</td>
           <td>{{ v.installed_version }}</td>
@@ -110,6 +110,9 @@ _HTML_TEMPLATE = """\
         {% endfor %}
       </tbody>
     </table>
+    {% if result.trivy.total_count > vuln_limit %}
+    <p class="note">Showing {{ vuln_limit }} of {{ result.trivy.total_count }} findings. See the JSON report for the full list.</p>
+    {% endif %}
     {% else %}
     <p style="color: var(--pass)">✓ No vulnerabilities detected.</p>
     {% endif %}
@@ -117,13 +120,17 @@ _HTML_TEMPLATE = """\
 
   <div class="section">
     <h2>📋 Dockerfile Lint Issues</h2>
-    {% if result.hadolint.issues %}
+    {% if result.hadolint.skipped %}
+    <p class="note">Skipped — no Dockerfile was supplied.</p>
+    {% elif not result.hadolint.ran %}
+    <p style="color: var(--high)">⚠️ Hadolint did not run: {{ result.hadolint.error }}</p>
+    {% elif result.hadolint.issues %}
     <table>
       <thead><tr><th>Code</th><th>Level</th><th>Line</th><th>Message</th></tr></thead>
       <tbody>
         {% for i in result.hadolint.issues %}
         <tr>
-          <td><a href="{{ i.url }}" target="_blank">{{ i.code }}</a></td>
+          <td>{% if i.url %}<a href="{{ i.url }}" target="_blank" rel="noopener noreferrer">{{ i.code }}</a>{% else %}{{ i.code }}{% endif %}</td>
           <td><span class="badge badge-{{ i.severity }}">{{ i.level }}</span></td>
           <td>{{ i.line }}</td>
           <td>{{ i.message }}</td>
@@ -138,7 +145,9 @@ _HTML_TEMPLATE = """\
 
   <div class="section">
     <h2>🔑 Secret Findings</h2>
-    {% if result.gitleaks.findings %}
+    {% if not result.gitleaks.ran %}
+    <p style="color: var(--high)">⚠️ Gitleaks did not run: {{ result.gitleaks.error }}</p>
+    {% elif result.gitleaks.findings %}
     <table>
       <thead><tr><th>Rule</th><th>Severity</th><th>File</th><th>Line</th><th>Description</th></tr></thead>
       <tbody>
@@ -153,6 +162,7 @@ _HTML_TEMPLATE = """\
         {% endfor %}
       </tbody>
     </table>
+    <p class="note">Secret values are never written to this report.</p>
     {% else %}
     <p style="color: var(--pass)">✓ No secrets detected.</p>
     {% endif %}
@@ -160,113 +170,7 @@ _HTML_TEMPLATE = """\
 
   <div class="meta" style="margin-top: 2rem; border-top: 1px solid var(--border); padding-top: 1rem;">
     Generated by Docker Security Scanner &nbsp;|&nbsp;
-    <a href="https://github.com/yourusername/docker-security-scanner">GitHub</a>
+    <a href="https://github.com/Vaibhav27072004/docker-security-scanner">GitHub</a>
   </div>
 </body>
 </html>
-"""
-
-
-class ReportGenerator:
-    """Generate security scan reports in multiple formats.
-
-    Args:
-        config: ScannerConfig instance.
-
-    Example::
-
-        generator = ReportGenerator(config)
-        paths = generator.generate_all(result, output_dir="reports")
-        print(paths)
-    """
-
-    def __init__(self, config: ScannerConfig) -> None:
-        self.config = config
-
-    def generate_all(
-        self, result: "AggregatedResult", output_dir: str = "reports"
-    ) -> dict[str, str]:
-        """Generate all configured report formats.
-
-        Args:
-            result: Aggregated scan result.
-            output_dir: Directory to write reports.
-
-        Returns:
-            Dictionary mapping format → file path.
-        """
-        out = ensure_dir(output_dir)
-        paths: dict[str, str] = {}
-
-        for fmt in self.config.report_formats:
-            if fmt == "html":
-                paths["html"] = self._generate_html(result, out)
-            elif fmt == "json":
-                paths["json"] = self._generate_json(result, out)
-            elif fmt == "markdown":
-                paths["markdown"] = self._generate_markdown(result, out)
-
-        logger.info("Reports written to %s: %s", out, list(paths.keys()))
-        return paths
-
-    def _generate_html(self, result: "AggregatedResult", out: Path) -> str:
-        """Render the HTML dashboard report."""
-        from jinja2 import Environment
-        env = Environment(autoescape=select_autoescape(["html"]))
-        template = env.from_string(_HTML_TEMPLATE)
-        html_content = template.render(result=result)
-        output_path = out / "security_report.html"
-        output_path.write_text(html_content, encoding="utf-8")
-        logger.info("HTML report: %s", output_path)
-        return str(output_path)
-
-    def _generate_json(self, result: "AggregatedResult", out: Path) -> str:
-        """Write the JSON structured report."""
-        output_path = out / "security_report.json"
-        write_json(result.to_dict(), output_path)
-        logger.info("JSON report: %s", output_path)
-        return str(output_path)
-
-    def _generate_markdown(self, result: "AggregatedResult", out: Path) -> str:
-        """Write a Markdown summary for GitHub PR comments."""
-        status = "✅ PASSED" if result.passed else "❌ FAILED"
-        lines = [
-            f"## 🔒 Docker Security Scan — {status}",
-            f"",
-            f"**Image:** `{result.image}`  ",
-            f"**Scanned:** {result.scan_timestamp}",
-            f"",
-            f"### 📊 Summary",
-            f"",
-            f"| Check | Status | Findings |",
-            f"|-------|--------|----------|",
-            f"| CVE Scan (Trivy) | {'✅' if result.trivy.passed else '❌'} | "
-            f"CRITICAL: {result.trivy.critical_count}, HIGH: {result.trivy.high_count}, "
-            f"MEDIUM: {result.trivy.medium_count}, LOW: {result.trivy.low_count} |",
-            f"| Dockerfile Lint (Hadolint) | {'✅' if result.hadolint.passed else '⚠️'} | "
-            f"{result.hadolint.total_count} issues |",
-            f"| Secret Detection (Gitleaks) | {'✅' if result.gitleaks.passed else '❌'} | "
-            f"{result.gitleaks.total_count} secrets found |",
-        ]
-
-        if result.trivy.critical_count > 0:
-            lines += ["", "### 🚨 Critical Vulnerabilities (Top 5)", ""]
-            lines.append("| CVE ID | Package | Installed | Fixed | CVSS |")
-            lines.append("|--------|---------|-----------|-------|------|")
-            for v in result.trivy.by_severity("CRITICAL")[:5]:
-                lines.append(
-                    f"| [{v.id}]({v.nvd_url}) | {v.package_name} | "
-                    f"{v.installed_version} | {v.fixed_version} | {v.cvss_score} |"
-                )
-
-        if result.gitleaks.findings:
-            lines += ["", "### 🔑 Secrets Detected", ""]
-            lines.append("| Rule | File | Line | Severity |")
-            lines.append("|------|------|------|----------|")
-            for f in result.gitleaks.findings[:5]:
-                lines.append(f"| {f.rule_id} | `{f.file}` | {f.line_number} | {f.severity} |")
-
-        output_path = out / "security_report.md"
-        output_path.write_text("\n".join(lines), encoding="utf-8")
-        logger.info("Markdown report: %s", output_path)
-        return str(output_path)

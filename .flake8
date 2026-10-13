@@ -1,0 +1,22 @@
+[flake8]
+# flake8 does not read pyproject.toml, so line-length is duplicated here.
+# It MUST match [tool.black] line-length in pyproject.toml.
+max-line-length = 100
+extend-ignore =
+    # E203: whitespace before ':' — disagrees with black's slice formatting
+    E203,
+    # W503/W504: line break before/after binary operator — black's choice
+    W503,
+    W504
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    build,
+    dist,
+    *.egg-info,
+    .trivy-cache
+per-file-ignores =
+    # Re-exports in package __init__ are intentional
+    src/docker_security_scanner/__init__.py:F401

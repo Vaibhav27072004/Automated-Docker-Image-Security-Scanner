@@ -10,13 +10,19 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from .utils import ScannerConfig, ScanExecutionError, ToolNotFoundError, ensure_dir, write_json
+from .utils import (
+    ScanExecutionError,
+    ScannerConfig,
+    ToolNotFoundError,
+    clean_tool_error,
+    ensure_dir,
+    utc_now_iso,
+)
 
 logger = logging.getLogger("docker_security_scanner.sbom")
 
@@ -67,7 +73,7 @@ class SBOMResult:
 
     image: str
     format: str
-    scan_timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    scan_timestamp: str = field(default_factory=utc_now_iso)
     components: list[SBOMComponent] = field(default_factory=list)
     output_path: str = ""
     error: str = ""
@@ -110,9 +116,7 @@ class SBOMResult:
             "summary": {
                 "total_components": self.total_components,
                 "unique_licenses": self.unique_licenses(),
-                "components_by_type": {
-                    k: len(v) for k, v in self.components_by_type().items()
-                },
+                "components_by_type": {k: len(v) for k, v in self.components_by_type().items()},
             },
             "passed": self.passed,
             "error": self.error,
@@ -141,9 +145,10 @@ class SBOMGenerator:
         try:
             subprocess.run(
                 [self.config.trivy_path, "--version"],
-                capture_output=True, check=True,
+                capture_output=True,
+                check=True,
             )
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        except (FileNotFoundError, OSError, subprocess.CalledProcessError) as exc:
             raise ToolNotFoundError("trivy") from exc
 
     def generate(
@@ -173,18 +178,20 @@ class SBOMGenerator:
         logger.info("Generating %s SBOM for image: %s", sbom_format.upper(), image)
 
         out_dir = ensure_dir(output_dir)
-        safe_name = image.replace("/", "_").replace(":", "_")
-        ext = "json" if sbom_format == "cyclonedx" else "spdx.json"
-        output_file = out_dir / f"sbom_{safe_name}_{sbom_format}.{ext}"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", image)
+        output_file = out_dir / f"sbom_{safe_name}_{sbom_format}.json"
 
         trivy_format = "cyclonedx" if sbom_format == "cyclonedx" else "spdx-json"
 
         cmd = [
             self.config.trivy_path,
             "image",
-            "--format", trivy_format,
-            "--output", str(output_file),
-            "--cache-dir", self.config.trivy_cache_dir,
+            "--format",
+            trivy_format,
+            "--output",
+            str(output_file),
+            "--cache-dir",
+            self.config.trivy_cache_dir,
         ]
         if self.config.trivy_skip_update:
             cmd.append("--skip-db-update")
@@ -196,9 +203,13 @@ class SBOMGenerator:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired as exc:
             raise ScanExecutionError(f"SBOM generation timed out for {image}") from exc
+        except FileNotFoundError as exc:
+            raise ToolNotFoundError("trivy") from exc
 
-        if proc.returncode != 0:
-            result.error = proc.stderr.strip()
+        if proc.returncode != 0 or not output_file.exists():
+            result.error = clean_tool_error(proc.stderr or "") or (
+                f"Trivy exited with code {proc.returncode} and wrote no SBOM."
+            )
             logger.error("SBOM generation failed: %s", result.error)
             return result
 
@@ -213,7 +224,8 @@ class SBOMGenerator:
 
         logger.info(
             "SBOM generated: %d components → %s",
-            result.total_components, output_file,
+            result.total_components,
+            output_file,
         )
         return result
 
@@ -255,32 +267,42 @@ class SBOMGenerator:
                     for lic in comp.get("licenses", [])
                     if lic.get("license", {}).get("id")
                 ]
-                components.append(SBOMComponent(
-                    name=comp.get("name", ""),
-                    version=comp.get("version", ""),
-                    purl=comp.get("purl", ""),
-                    licenses=licenses,
-                    package_type=comp.get("type", "library"),
-                    supplier=comp.get("supplier", {}).get("name", "") if isinstance(
-                        comp.get("supplier"), dict) else "",
-                ))
+                components.append(
+                    SBOMComponent(
+                        name=comp.get("name", ""),
+                        version=comp.get("version", ""),
+                        purl=comp.get("purl", ""),
+                        licenses=licenses,
+                        package_type=comp.get("type", "library"),
+                        supplier=(
+                            comp.get("supplier", {}).get("name", "")
+                            if isinstance(comp.get("supplier"), dict)
+                            else ""
+                        ),
+                    )
+                )
         else:
             # SPDX format
             for pkg in data.get("packages", []):
                 purl = next(
-                    (ref.get("referenceLocator", "") for ref in pkg.get("externalRefs", [])
-                     if ref.get("referenceType") == "purl"),
+                    (
+                        ref.get("referenceLocator", "")
+                        for ref in pkg.get("externalRefs", [])
+                        if ref.get("referenceType") == "purl"
+                    ),
                     "",
                 )
                 declared_lic = pkg.get("licenseDeclared", "NOASSERTION")
                 licenses = [] if declared_lic in ("NOASSERTION", "NONE", "") else [declared_lic]
-                components.append(SBOMComponent(
-                    name=pkg.get("name", ""),
-                    version=pkg.get("versionInfo", ""),
-                    purl=purl,
-                    licenses=licenses,
-                    package_type="library",
-                    supplier=pkg.get("supplier", ""),
-                ))
+                components.append(
+                    SBOMComponent(
+                        name=pkg.get("name", ""),
+                        version=pkg.get("versionInfo", ""),
+                        purl=purl,
+                        licenses=licenses,
+                        package_type="library",
+                        supplier=pkg.get("supplier", ""),
+                    )
+                )
 
         return components

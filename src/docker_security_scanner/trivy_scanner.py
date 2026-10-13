@@ -16,19 +16,27 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from .utils import (
-    ScannerConfig,
     ScanExecutionError,
+    ScannerConfig,
     ToolNotFoundError,
+    clean_tool_error,
     severity_rank,
     truncate_string,
+    utc_now_iso,
 )
 
 logger = logging.getLogger("docker_security_scanner.trivy")
+
+# Trivy's own progress/log output goes to stderr, but writing the JSON report to
+# a real file (rather than "/dev/stdout") is what makes this work on Windows,
+# where no /dev/stdout device path exists.
+_SCAN_TIMEOUT_SECONDS = 300
 
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
@@ -44,7 +52,7 @@ class CVE:
         fixed_version: Version that resolves the issue (if available).
         title: Short description.
         description: Full description.
-        cvss_score: CVSS v3 base score (0.0–10.0).
+        cvss_score: CVSS v3 base score (0.0-10.0).
         cvss_vector: CVSS v3 vector string.
         references: List of reference URLs.
         published_date: Publication date string.
@@ -107,7 +115,7 @@ class TrivyScanResult:
     """
 
     image: str
-    scan_timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    scan_timestamp: str = field(default_factory=utc_now_iso)
     vulnerabilities: list[CVE] = field(default_factory=list)
     error: str = ""
     raw_output: str = ""
@@ -138,9 +146,24 @@ class TrivyScanResult:
         return sum(1 for v in self.vulnerabilities if v.is_fixable)
 
     @property
+    def ran(self) -> bool:
+        """True when the scan executed without an error.
+
+        This is deliberately separate from :attr:`passed`: a scan that could not
+        run has no findings, and must never be mistaken for a clean result.
+        """
+        return not self.error
+
+    @property
     def passed(self) -> bool:
-        """True when no vulnerabilities were found."""
-        return self.total_count == 0 and not self.error
+        """True when the scan ran and found no vulnerabilities at all.
+
+        This is a strict, factual "is it spotless?" flag. It is NOT the security
+        gate — the gate is the configured policy, evaluated in
+        :meth:`docker_security_scanner.scanner.SecurityScanner.evaluate_policy`,
+        which honours the CRITICAL/HIGH thresholds.
+        """
+        return self.total_count == 0 and self.ran
 
     def by_severity(self, severity: str) -> list[CVE]:
         """Filter vulnerabilities by severity level.
@@ -166,15 +189,32 @@ class TrivyScanResult:
 
     def summary(self) -> str:
         """Return a human-readable summary string."""
+        if not self.ran:
+            return f"Trivy scan for {self.image} - FAILED TO RUN: {self.error}"
         return (
-            f"Trivy scan for {self.image} — "
+            f"Trivy scan for {self.image} - "
             f"CRITICAL: {self.critical_count}, HIGH: {self.high_count}, "
             f"MEDIUM: {self.medium_count}, LOW: {self.low_count} "
             f"(Total: {self.total_count}, Fixable: {self.fixable_count})"
         )
 
-    def to_dict(self) -> dict:
-        """Serialise to a dictionary for JSON output."""
+    def to_dict(self, max_vulnerabilities: int = 0) -> dict:
+        """Serialise to a dictionary for JSON output.
+
+        Args:
+            max_vulnerabilities: Cap on individual CVE records included
+                (0 = unlimited). Summary counts always reflect every finding,
+                so capping only trims the detail list.
+
+        Returns:
+            JSON-serialisable mapping.
+        """
+        vulns = self.vulnerabilities
+        truncated = False
+        if max_vulnerabilities and len(vulns) > max_vulnerabilities:
+            vulns = vulns[:max_vulnerabilities]
+            truncated = True
+
         return {
             "image": self.image,
             "scan_timestamp": self.scan_timestamp,
@@ -186,9 +226,12 @@ class TrivyScanResult:
                 "low": self.low_count,
                 "fixable": self.fixable_count,
             },
+            "ran": self.ran,
             "passed": self.passed,
             "error": self.error,
-            "vulnerabilities": [v.to_dict() for v in self.vulnerabilities],
+            "vulnerabilities_truncated": truncated,
+            "vulnerabilities_included": len(vulns),
+            "vulnerabilities": [v.to_dict() for v in vulns],
         }
 
 
@@ -197,7 +240,7 @@ class TrivyScanner:
     """Wrapper around the Trivy CLI for Docker image vulnerability scanning.
 
     Args:
-        config: :class:`~src.utils.ScannerConfig` instance.
+        config: :class:`~docker_security_scanner.utils.ScannerConfig` instance.
 
     Example::
 
@@ -224,14 +267,15 @@ class TrivyScanner:
                 capture_output=True,
                 check=True,
             )
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        except (FileNotFoundError, OSError, subprocess.CalledProcessError) as exc:
             raise ToolNotFoundError("trivy") from exc
 
-    def _build_command(self, image: str) -> list[str]:
+    def _build_command(self, image: str, output_file: str) -> list[str]:
         """Build the Trivy CLI command arguments.
 
         Args:
             image: Docker image reference to scan.
+            output_file: Path Trivy should write its JSON report to.
 
         Returns:
             Argument list for :func:`subprocess.run`.
@@ -239,10 +283,14 @@ class TrivyScanner:
         cmd = [
             self.config.trivy_path,
             "image",
-            "--format", "json",
-            "--output", "/dev/stdout",
-            "--exit-code", "0",          # never exit non-zero — we handle policy
-            "--cache-dir", self.config.trivy_cache_dir,
+            "--format",
+            "json",
+            "--output",
+            output_file,
+            "--exit-code",
+            "0",  # never exit non-zero — we handle policy
+            "--cache-dir",
+            self.config.trivy_cache_dir,
         ]
 
         if self.config.trivy_skip_update:
@@ -258,10 +306,12 @@ class TrivyScanner:
             image: Docker image reference (e.g. ``nginx:1.25``).
 
         Returns:
-            :class:`TrivyScanResult` populated with all findings.
+            :class:`TrivyScanResult` populated with all findings. If Trivy could
+            not run, ``result.error`` is set and ``result.ran`` is False.
 
         Raises:
-            ScanExecutionError: If Trivy fails to execute.
+            ToolNotFoundError: If the trivy binary disappeared.
+            ScanExecutionError: If Trivy timed out or exited unexpectedly.
 
         Example::
 
@@ -270,56 +320,70 @@ class TrivyScanner:
                 print(cve.id, cve.package_name)
         """
         logger.info("Starting Trivy scan for image: %s", image)
-        cmd = self._build_command(image)
-        logger.debug("Running command: %s", " ".join(cmd))
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ScanExecutionError(f"Trivy timed out scanning {image}") from exc
-        except FileNotFoundError as exc:
-            raise ToolNotFoundError("trivy") from exc
+        # Trivy writes its report to a real file. Using a temp file rather than
+        # "/dev/stdout" keeps this working on Windows and avoids interleaving
+        # the JSON with Trivy's own progress output.
+        with tempfile.TemporaryDirectory(prefix="docker-scan-trivy-") as tmpdir:
+            output_file = Path(tmpdir) / "trivy-report.json"
+            cmd = self._build_command(image, str(output_file))
+            logger.debug("Running command: %s", " ".join(cmd))
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=_SCAN_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ScanExecutionError(f"Trivy timed out scanning {image}") from exc
+            except FileNotFoundError as exc:
+                raise ToolNotFoundError("trivy") from exc
+
+            raw_output = ""
+            if output_file.exists():
+                raw_output = output_file.read_text(encoding="utf-8", errors="replace")
 
         if proc.returncode not in (0, 1):
             raise ScanExecutionError(
-                f"Trivy exited with code {proc.returncode}: {proc.stderr}"
+                f"Trivy exited with code {proc.returncode}: "
+                f"{clean_tool_error(proc.stderr or '')}"
             )
 
-        return self._parse_output(image, proc.stdout, proc.stderr)
+        # Older call sites relied on Trivy printing JSON to stdout; fall back to
+        # stdout if the report file came back empty for any reason.
+        if not raw_output.strip():
+            raw_output = proc.stdout
 
-    def _parse_output(
-        self, image: str, stdout: str, stderr: str
-    ) -> TrivyScanResult:
+        return self._parse_output(image, raw_output, proc.stderr)
+
+    def _parse_output(self, image: str, report: str, stderr: str) -> TrivyScanResult:
         """Parse Trivy JSON output into a :class:`TrivyScanResult`.
 
         Args:
             image: Image reference that was scanned.
-            stdout: Raw stdout from Trivy.
-            stderr: Raw stderr from Trivy.
+            report: Raw JSON report text produced by Trivy.
+            stderr: Raw stderr from Trivy, used for error reporting.
 
         Returns:
             Populated :class:`TrivyScanResult`.
         """
-        result = TrivyScanResult(image=image, raw_output=stdout)
+        result = TrivyScanResult(image=image, raw_output=report)
 
-        if not stdout.strip():
-            result.error = stderr.strip() or "Trivy produced no output."
+        if not report.strip():
+            result.error = clean_tool_error(stderr) or "Trivy produced no output."
             logger.warning("Trivy produced no output for %s: %s", image, result.error)
             return result
 
         try:
-            data = json.loads(stdout)
+            data = json.loads(report)
         except json.JSONDecodeError as exc:
             result.error = f"Failed to parse Trivy JSON: {exc}"
             logger.error(result.error)
             return result
 
-        results_list = data.get("Results", [])
+        results_list = data.get("Results") or []
         vulnerabilities: list[CVE] = []
 
         for target_result in results_list:
@@ -361,16 +425,20 @@ class TrivyScanner:
         # Extract CVSS v3 score
         cvss_score = 0.0
         cvss_vector = ""
-        cvss_data = vuln.get("CVSS", {})
+        cvss_data = vuln.get("CVSS") or {}
         for source in ("nvd", "redhat", "ghsa"):
-            if source in cvss_data and "V3Score" in cvss_data[source]:
-                cvss_score = float(cvss_data[source]["V3Score"])
-                cvss_vector = cvss_data[source].get("V3Vector", "")
+            source_data = cvss_data.get(source)
+            if isinstance(source_data, dict) and "V3Score" in source_data:
+                try:
+                    cvss_score = float(source_data["V3Score"])
+                except (TypeError, ValueError):
+                    cvss_score = 0.0
+                cvss_vector = source_data.get("V3Vector", "")
                 break
 
         return CVE(
             id=cve_id,
-            severity=vuln.get("Severity", "UNKNOWN").upper(),
+            severity=(vuln.get("Severity") or "UNKNOWN").upper(),
             package_name=vuln.get("PkgName", ""),
             installed_version=vuln.get("InstalledVersion", ""),
             fixed_version=vuln.get("FixedVersion", "N/A"),
@@ -378,7 +446,7 @@ class TrivyScanner:
             description=vuln.get("Description", ""),
             cvss_score=cvss_score,
             cvss_vector=cvss_vector,
-            references=vuln.get("References", []),
+            references=vuln.get("References") or [],
             published_date=vuln.get("PublishedDate", ""),
             target=target,
         )

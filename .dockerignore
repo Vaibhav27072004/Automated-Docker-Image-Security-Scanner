@@ -1,0 +1,66 @@
+# Keep the build context small and secret-free.
+# Without this file `docker build -f docker/Dockerfile .` ships the whole repo
+# (including .git, local virtualenvs and generated reports) to the daemon.
+
+# VCS
+.git
+.gitignore
+.github
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+.Python
+
+# Python caches / build output
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+build
+dist
+.eggs
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+
+# Secrets — never let a real .env into the image context
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+secrets
+
+# Generated output
+reports
+reports-*
+sbom.json
+sbom.xml
+scan_results.json
+*.log
+
+# Tool caches
+.trivy-cache
+trivy-cache
+.cache
+
+# Editors / OS
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db
+
+# Tests and examples are not needed in the scanner image
+tests
+examples
+docs

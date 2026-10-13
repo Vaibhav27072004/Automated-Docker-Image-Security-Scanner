@@ -6,11 +6,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from src.utils import ScannerConfig
+from docker_security_scanner.utils import ScannerConfig
 
 
 @pytest.fixture
@@ -28,6 +27,37 @@ def config() -> ScannerConfig:
         sbom_formats=["cyclonedx"],
         log_level="WARNING",
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a developer's real .env out of the test run.
+
+    ScannerConfig.from_env() reads the process environment, so a local .env
+    (or exported CI variables) would otherwise make config tests flaky.
+    """
+    for var in (
+        "FAIL_ON_SEVERITY",
+        "CRITICAL_THRESHOLD",
+        "HIGH_THRESHOLD",
+        "FAIL_ON_DOCKERFILE_ERRORS",
+        "FAIL_ON_SCANNER_ERROR",
+        "TRIVY_PATH",
+        "HADOLINT_PATH",
+        "GITLEAKS_PATH",
+        "TRIVY_CACHE_DIR",
+        "TRIVY_SKIP_UPDATE",
+        "HADOLINT_CONFIG",
+        "HADOLINT_IGNORE",
+        "GITLEAKS_CONFIG",
+        "REPORT_OUTPUT_DIR",
+        "REPORT_FORMATS",
+        "SBOM_FORMATS",
+        "MAX_JSON_VULNERABILITIES",
+        "LOG_LEVEL",
+        "LOG_FILE",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture
@@ -49,8 +79,8 @@ def sample_trivy_output() -> str:
                         "InstalledVersion": "1.1.1n-0+deb11u4",
                         "FixedVersion": "1.1.1n-0+deb11u5",
                         "Severity": "CRITICAL",
-                        "Title": "OpenSSL: Excessive Resource Usage Verifying X.509 Policy Constraints",
-                        "Description": "A security vulnerability in OpenSSL allows for excessive resource usage.",
+                        "Title": "OpenSSL: Excessive Resource Usage Verifying X.509",
+                        "Description": "A security vulnerability in OpenSSL.",
                         "CVSS": {
                             "nvd": {
                                 "V3Score": 9.8,
@@ -66,10 +96,13 @@ def sample_trivy_output() -> str:
                         "InstalledVersion": "1.1.1n-0+deb11u4",
                         "FixedVersion": "N/A",
                         "Severity": "HIGH",
-                        "Title": "OpenSSL: Input buffer over-read in AES-XTS implementation on 64 bit ARM",
+                        "Title": "OpenSSL: Input buffer over-read in AES-XTS",
                         "Description": "Issue affecting AES-XTS on ARM.",
                         "CVSS": {
-                            "nvd": {"V3Score": 7.5, "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"}
+                            "nvd": {
+                                "V3Score": 7.5,
+                                "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                            }
                         },
                         "References": [],
                         "PublishedDate": "2023-04-20T00:00:00Z",
@@ -80,10 +113,13 @@ def sample_trivy_output() -> str:
                         "InstalledVersion": "1.1.1n-0+deb11u4",
                         "FixedVersion": "1.1.1u-1",
                         "Severity": "MEDIUM",
-                        "Title": "OpenSSL: Possible DoS translating ASN.1 object identifiers",
+                        "Title": "OpenSSL: Possible DoS translating ASN.1 identifiers",
                         "Description": "DoS issue in ASN.1 handling.",
                         "CVSS": {
-                            "nvd": {"V3Score": 5.5, "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H"}
+                            "nvd": {
+                                "V3Score": 5.5,
+                                "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:H",
+                            }
                         },
                         "References": [],
                         "PublishedDate": "2023-05-30T00:00:00Z",
