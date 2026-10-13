@@ -16,4 +16,4 @@ pydantic>=2.6,<3.0             # Configuration validation
 python-dotenv>=1.0,<2.0        # .env file loading
 
 # ─── Report generation ───────────────────────────────────────
-jinja2>=3.1,<4.0               # HTML report templating
+jinja2>=3.1.6,<4.0               # HTML report templating
