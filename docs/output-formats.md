@@ -132,7 +132,7 @@ Standard JSON format used for:
 - Government contract requirements (EO 14028)
 - Enterprise security tools integration
 
-### SPDX (`sbom_*_spdx.spdx.json`)
+### SPDX (`sbom_*_spdx.json`)
 Linux Foundation standard used for:
 - Open source license compliance
 - Legal auditing

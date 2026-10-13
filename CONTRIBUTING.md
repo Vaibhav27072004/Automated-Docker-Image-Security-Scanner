@@ -17,7 +17,7 @@ Thank you for your interest in contributing! 🎉
 ## Development Setup
 
 ```bash
-git clone https://github.com/yourusername/docker-security-scanner.git
+git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
 cd docker-security-scanner
 
 python -m venv .venv
@@ -59,7 +59,9 @@ black src/ tests/ && isort src/ tests/ && flake8 src/ tests/ && mypy src/
 
 2. Add a `_check_tool_available()` call in `__init__`
 
-3. Integrate into `src/scanner.py` → `SecurityScanner.scan_image()`
+3. Integrate into `src/docker_security_scanner/scanner.py` →
+   `SecurityScanner.scan_image()`, and give the new result an `error` field plus
+   a `ran` property so `evaluate_policy()` can fail closed when it cannot run
 
 4. Add tests in `tests/test_your_scanner.py`
 
@@ -72,7 +74,13 @@ black src/ tests/ && isort src/ tests/ && flake8 src/ tests/ && mypy src/
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feat/your-feature`
 3. Make changes with passing tests
-4. Run the full test suite: `pytest tests/ --cov=src --cov-fail-under=85`
+4. Run the full test suite: `pytest tests/ --cov --cov-fail-under=85`
+5. Run the same checks CI runs — they all read `pyproject.toml` / `.flake8`,
+   so no flags are needed:
+
+   ```bash
+   black --check src/ tests/ setup.py && isort --check-only src/ tests/ setup.py && flake8 src/ tests/ setup.py && mypy src/
+   ```
 5. Run linting: `black --check src/ && flake8 src/`
 6. Push and open a PR against `main`
 

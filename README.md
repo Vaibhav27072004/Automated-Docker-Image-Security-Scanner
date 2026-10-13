@@ -1,12 +1,11 @@
 <div align="center">
   <h1>🔒 Docker Image Security Scanner</h1>
-  <p><strong>Every day, 2,847 container images ship with known CVEs. This catches them at build time.<br>A zero-trust security gate that has already blocked 43 simulated production breaches.</strong></p>
+  <p><strong>A build-time security gate for container images: CVEs, hardcoded secrets,<br>Dockerfile misconfigurations and SBOMs, behind one policy that fails closed.</strong></p>
 
-  [![Build Status](https://github.com/yourusername/docker-security-scanner/actions/workflows/security-scan.yml/badge.svg)](https://github.com/yourusername/docker-security-scanner/actions/workflows/security-scan.yml)
+  [![Build Status](https://github.com/Vaibhav27072004/docker-security-scanner/actions/workflows/security-scan.yml/badge.svg)](https://github.com/Vaibhav27072004/docker-security-scanner/actions/workflows/security-scan.yml)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-  [![Code Quality](https://img.shields.io/badge/Code%20Quality-A%2B-success.svg)](#)
-  [![Coverage](https://img.shields.io/badge/coverage-%3E85%25-brightgreen)](tests/)
-  [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
+  [![Coverage](https://img.shields.io/badge/coverage%20gate-85%25-brightgreen)](tests/)
+  [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
   [![Trivy](https://img.shields.io/badge/Powered%20by-Trivy-blue)](https://trivy.dev)
   [![Hadolint](https://img.shields.io/badge/Linted%20by-Hadolint-orange)](https://github.com/hadolint/hadolint)
   [![Gitleaks](https://img.shields.io/badge/Secrets-Gitleaks-red)](https://gitleaks.io)
@@ -17,37 +16,87 @@
 
 ## 🎯 Executive Summary
 
-### The Problem in Production
+### The problem
 
-Every year, enterprises spend **$4.24M USD** remediating container vulnerabilities discovered post-deployment (Gartner 2024). The Automated Docker Image Security Scanner **moves this detection left** — catching 95% of known CVEs at build time, not when they're actively exploited in production.
+Container images routinely ship with known CVEs and hardcoded credentials, and
+the fix is well understood: scan at build time and block the bad build. Most
+teams add a scanner to CI and move on.
 
-### What This Scanner Does
+The failure mode nobody tests is what the gate reports **when the scanner
+itself cannot run.** A scanner that fails to start finds nothing — and "found
+nothing" is the same zero as "found no problems." A gate that reads only that
+number cannot tell a broken scanner from a clean image, so it shows a green
+check mark for both.
 
-✓ **Trivy CVE Scanning** → 0-day vulnerability detection with CVSS scoring  
-✓ **Hadolint Analysis** → CIS Docker Benchmark enforcement  
-✓ **Gitleaks Detection** → Prevents credential leakage in image layers  
-✓ **SBOM Generation** → Executive Order 14028 compliance (required by DoD/CISA)
+That is the problem this project solves, and it is not theoretical: **this
+scanner had that bug, and we caught it reporting `✅ PASSED` on an image
+carrying 22 CRITICAL CVEs and 5 hardcoded credentials** — with zero scans
+having run. Three ordinary mistakes reached that path, including following this
+project's own setup documentation. See
+[**The Real-World Problem This Solves**](#-the-real-world-problem-this-solves)
+for the full case study, the root cause, and the fix.
 
-### Measurable Impact (Real Data from Deployments)
+### What this scanner does
 
-- **12 CRITICAL CVEs blocked** before reaching production (in demo image alone)
-- **99.2% of hardcoded secrets detected** (tested on real AWS/GCP credentials)
-- **3 Dockerfile anti-patterns caught** that would enable container escape
-- **Scans complete in 47 seconds** (fully automated, zero human review needed)
+Four checks over an image and its build context, in one pass:
+
+✓ **Trivy CVE scanning** → OS and language-package CVEs with CVSS scores
+✓ **Hadolint analysis** → Dockerfile misconfiguration and anti-pattern linting
+✓ **Gitleaks detection** → hardcoded secrets in the build context
+✓ **SBOM generation** → CycloneDX and SPDX component inventories
+
+### What makes it a gate you can trust
+
+**One verdict, computed once.** A single `PolicyDecision` is produced *before*
+any report is written, and the console output, all three report formats and the
+process exit code read that same object. They cannot disagree — which they
+previously did, three different ways, in a single run.
+
+**It fails closed.** A scanner that could not run is a policy violation that
+names the tool and the reason, never a quiet zero:
+
+```console
+❌ Security policy: FAILED
+  • scanner did not run (Trivy CVE scan: Required tool 'trivy' not found...)
+
+Note: zero findings from a scanner that failed to run is not evidence of a
+clean image.
+```
+
+**The policy decides, not the raw counts.** A LOW CVE in a base image does not
+fail your build unless you say so. `FAIL_ON_SEVERITY` and the thresholds are
+the only thing that sets the verdict, and a separate `is_clean` flag carries the
+stricter "nothing at all was found" fact so the two never get confused.
+
+### What the demo images actually produce
+
+Run against the two bundled examples (counts move as upstream advisories land,
+so treat them as a snapshot, not a promise):
+
+| | `examples/vulnerable-app` | `examples/secure-app` |
+|---|---|---|
+| CRITICAL CVEs | 22 | 0 |
+| HIGH CVEs | 379 | 44 |
+| Hardcoded secrets | 5 | 0 |
+| Dockerfile findings | 5 (0 error-level) | 0 |
+| Verdict | ❌ FAILED | base-image CVEs only |
+
+The secure example demonstrates Dockerfile hygiene — digest-pinned base image,
+non-root user, multi-stage build, no secrets. Its remaining HIGH CVEs come from
+the Debian base image, not from the Dockerfile, which is exactly the triage
+split the scanner exists to make visible.
 
 ---
 
 ## ⚡ Start Here — 3 Minutes to First Scan
 
 **What you'll have after 3 minutes:**
-- ✅ Working security scanner running locally
-- ✅ Real vulnerability report (12+ critical CVEs in demo image)
-- ✅ Visual dashboard showing security posture
-- ✅ Understanding of how FAANG companies prevent container breaches
+- ✅ A working security scanner running locally
+- ✅ A real vulnerability report for the bundled demo image
+- ✅ An HTML dashboard, a JSON report and a Markdown PR summary
+- ✅ An exit code your CI can gate on
 
-**Requirements:** Docker + Python 3.9+
-
-**No need to understand:** Trivy internals, container runtimes, or security scanning.
+**Requirements:** Docker + Python 3.10+ (3.9 is end-of-life and unsupported)
 
 ### 1. Installation
 
@@ -62,48 +111,78 @@ git clone https://github.com/Vaibhav27072004/docker-security-scanner.git && \
 
 ### 2. Three Progressive Examples
 
+Scan a public image:
+
 ```bash
-# Example 1: Scan a public image (most common)
 docker-scan image nginx:1.25
+```
 
-# Example 2: Full scan with your Dockerfile & Source
-docker build -t vuln-app:latest examples/vulnerable-app/
-docker-scan image vuln-app:latest --dockerfile examples/vulnerable-app/Dockerfile --scan-path examples/vulnerable-app/
+Full scan of an image plus its Dockerfile and source:
 
-# Example 3: Check if it passes production standards (custom policy)
-FAIL_ON_SEVERITY=CRITICAL,HIGH docker-scan image vuln-app:latest
+```bash
+docker build -t vuln-app:latest examples/vulnerable-app/ && docker-scan image vuln-app:latest --dockerfile examples/vulnerable-app/Dockerfile --scan-path examples/vulnerable-app/
+```
+
+Tighten the policy so any MEDIUM CVE also fails the build:
+
+```bash
+docker-scan image vuln-app:latest --fail-on-severity CRITICAL,HIGH,MEDIUM
 ```
 
 ### 3. Expected Output
 
+Scanning `alpine:3.19` with the default policy (fail on CRITICAL, allow up to
+10 HIGH):
+
 ```
-✅ SCAN PASSED: No critical vulnerabilities (for a secure image)
+──────────────────── 🔒 Docker Security Scanner ────────────────────
+Scanning image: alpine:3.19
 
-📊 RESULTS
-┌────────────────────────────────────────┐
-│ Vulnerability Scan (Trivy)             │
-├──────────────┬────────┬────────────────┤
-│ Severity     │ Count  │ Fixed Available│
-├──────────────┼────────┼────────────────┤
-│ CRITICAL     │   0    │        -       │
-│ HIGH         │   2    │       2 ✓      │
-│ MEDIUM       │   8    │       6        │
-│ LOW          │  14    │       8        │
-└──────────────┴────────┴────────────────┘
+Step 1/4: Running Trivy CVE scan...
+    CVE Summary
+╭──────────┬───────╮
+│ Severity │ Count │
+├──────────┼───────┤
+│ CRITICAL │     0 │
+│ HIGH     │     2 │
+│ MEDIUM   │     5 │
+│ LOW      │     3 │
+╰──────────┴───────╯
 
-📋 Dockerfile Lint (Hadolint)
-✅ No CIS Docker Benchmark violations
+Step 2/4: Skipping Hadolint (no Dockerfile specified).
 
-🔐 Secret Detection (Gitleaks)
-✅ No hardcoded credentials detected
+Step 3/4: Running Gitleaks secret scan on .
+  Gitleaks: ✓ PASSED - Secrets: 0
 
-📦 SBOM Generated
-✅ CycloneDX (487 components)
-✅ SPDX (compliance-ready)
+Step 4/4: Generating SBOM...
+  ✓ CYCLONEDX SBOM: reports/sbom_alpine_3.19_cyclonedx.json
+  ✓ SPDX SBOM: reports/sbom_alpine_3.19_spdx.json
 
-⏱️  Scan completed in: 47 seconds
-💾 Reports saved to: ./reports/
+Generating reports...
+  ✓ HTML report: reports/security_report.html
+  ✓ JSON report: reports/security_report.json
+  ✓ MARKDOWN report: reports/security_report.md
+
+✅ Security policy: PASSED
 ```
+
+Ten CVEs were found and the scan still passes, because the configured policy
+allows them. When it fails, it says exactly why:
+
+```
+❌ Security policy: FAILED
+  • 22 CRITICAL CVEs (threshold: 0)
+  • 379 HIGH CVEs (threshold: 10)
+  • 5 hardcoded secrets detected
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Policy passed |
+| `1` | Policy violated — findings over threshold, secrets, Dockerfile errors, **or a scanner that did not run** |
+| `2` | Scanner or configuration error |
 
 ---
 
@@ -113,44 +192,68 @@ FAIL_ON_SEVERITY=CRITICAL,HIGH docker-scan image vuln-app:latest
 
 Scans both OS-level and application dependencies for known vulnerabilities:
 
-- **188,000+ CVE definitions** from NVD, Red Hat, Ubuntu, Debian, Alpine
-- **CVSS 3.1 scoring** with severity classification (critical → low)
-- **Exploitability detection** — identifies which CVEs are actively exploited
-- **Remediation guidance** — suggests base image upgrades and package patches
-- **Layer-by-layer analysis** — identifies which Dockerfile stage introduced the vulnerability
+- **Trivy's vulnerability database** — advisories from NVD, Red Hat, Debian,
+  Ubuntu, Alpine and language ecosystems
+- **CVSS v3 scoring** with severity classification (CRITICAL → LOW), read from
+  the NVD, Red Hat or GHSA entry, whichever Trivy supplies first
+- **Fix availability** — each finding records whether a fixed version exists,
+  surfaced as a `fixable` count so you can tell actionable from unactionable
+- **Target attribution** — each CVE records the Trivy target (OS package set or
+  language manifest) it was found in
+- **Findings sorted by severity, then CVSS**, so the worst items are first in
+  every report
 
-**Real Example**: Demo image using `ubuntu:latest` discovers:
+**Real example** — `examples/vulnerable-app`, which is built `FROM ubuntu:latest`:
+
 ```text
-├── libssl3 → CVE-2024-5123 (CRITICAL, exploited in the wild)
-├── openssh-server → CVE-2024-6387 (CRITICAL, unauthenticated RCE)
-└── curl → CVE-2024-2398 (HIGH, SSRF vulnerability)
+CRITICAL  CVE-2026-43037  linux-libc-dev  6.8.0-111.111 -> 6.8.0-134.134  CVSS 8.8
+CRITICAL  CVE-2026-23216  linux-libc-dev  6.8.0-111.111 -> 6.8.0-117.117  CVSS 7.8
+CRITICAL  CVE-2026-64564  linux-libc-dev  6.8.0-111.111 -> (no fix)       CVSS 7.8
 ```
+
+Counts change as upstream advisories land; run the scan to get current numbers.
 
 ### Dockerfile Linting — Hadolint Integration
 
-Enforces **CIS Docker Benchmark** (consensus security standard):
+Applies Hadolint's Dockerfile rule set, which overlaps with — but is not an
+implementation of — the CIS Docker Benchmark:
 
-- **50+ rules** covering security, best practices, maintainability
-- **Failures vs. warnings** — distinguish "security critical" from "just better"
-- **Per-stage analysis** — multi-stage builds analyzed independently
-- **Configuration compliance** — catches `RUN as root`, missing USER instruction, etc.
+- **Hadolint `DL*` rules plus ShellCheck `SC*` rules** for `RUN` script bodies
+- **Levels mapped to severities** — `error` → HIGH, `warning` → MEDIUM,
+  `info`/`style` → LOW
+- **Only error-level findings gate the build** by default
+  (`FAIL_ON_DOCKERFILE_ERRORS`); warnings are reported, not blocking
+- **Rules categorised** by prefix (Base Image, Package Management, Permissions,
+  Shell Script, …) and linked to the Hadolint wiki
+- **A rule set of interest flagged** as security-critical: `DL3002`, `DL3007`,
+  `DL4006`, `SC2035`
 
-**Examples Caught**:
+**Examples caught** in `examples/vulnerable-app`:
 ```text
-DL3059: Multiple `USER` instructions (creates confusion, security risk)
-DL3008: Pin versions in apt-get (ensures reproducible, secure builds)
-DL3006: Always tag base images (never use :latest, :alpine, etc.)
-DL3002: Avoid running as root (enables container escape)
+DL3007   warning  line 10  Using latest is prone to errors; pin the version
+DL3008   warning  line 14  Pin versions in apt-get install
+DL3042   warning  line 33  Avoid use of cache directory with pip
+DL3025   warning  line 40  Use arguments JSON notation for CMD and ENTRYPOINT
+DL3015   info     line 14  Avoid additional packages by specifying --no-install-recommends
 ```
+
+> **Scope note.** Hadolint reads the Dockerfile as text. It does not detect
+> secrets hardcoded in `ENV` instructions — that is what the Gitleaks step is
+> for, and it does flag them.
 
 ### Secret Detection — Gitleaks Integration
 
 Prevents hardcoded credentials in image layers:
 
-- **70+ secret patterns** — AWS keys, private keys, tokens, database passwords
-- **High-entropy string detection** — catches common obfuscation attempts
-- **Context awareness** — reduces false positives (knows differences between dev/prod configs)
-- **Remediation paths** — suggests how to properly handle secrets
+- **Gitleaks' built-in rule set** — cloud keys, private keys, provider tokens
+- **Shannon entropy** recorded per finding, and used to rank an unrecognised
+  high-entropy match as HIGH rather than MEDIUM
+- **Severity by rule family** — a match on an AWS/GCP/Azure/private-key/
+  provider-token rule is treated as CRITICAL
+- **Filesystem scanning** (`--no-git`), so it works on a build context with no
+  git history
+- **Secret values are never written to a report** — every finding is emitted
+  through a fixed-width mask that reveals neither the plaintext nor its length
 
 **Detects**:
 - AWS Access Keys, Azure Storage Keys, GCP Service Accounts
@@ -159,15 +262,26 @@ Prevents hardcoded credentials in image layers:
 - Database connection strings, API endpoints
 - High-entropy strings (tokens, hashed secrets)
 
-### SBOM Generation — Compliance Ready
+> **Detection is rule-based, not exhaustive.** On the bundled vulnerable app
+> Gitleaks finds the AWS keys and the GitHub token but not the plain
+> `DB_PASSWORD` string or the example Slack webhook. Treat it as a strong net,
+> not a guarantee — and keep using a secrets manager.
 
-Generates software inventory satisfying U.S. Executive Order 14028:
+### SBOM Generation
 
-- **CycloneDX format** — ISO/IEC 5910 standardized, enterprise-preferred
-- **SPDX format** — NTIA minimum elements compliance
-- **License tracking** — identifies GPL, proprietary, and permissive licenses
-- **Component versions** — every package + exact version documented
-- **Integrity hashes** — SHA-256 checksums for verification
+Generates a machine-readable component inventory in the two formats most
+commonly requested for supply-chain review:
+
+- **CycloneDX JSON** and **SPDX JSON**, both produced by Trivy
+- **License extraction** — declared licenses per component, plus a deduplicated
+  list across the image (`NOASSERTION` is correctly recorded as *no* license)
+- **Component versions and PURLs** — every package with its exact version and
+  package URL
+- **Component type grouping** — library/application/OS counts in the summary
+
+An SBOM in these formats is a prerequisite for most supply-chain policies
+(including the inventory requirements referenced by U.S. Executive Order 14028),
+but generating one is not by itself a compliance attestation.
 
 **Example Output**:
 ```json
@@ -232,7 +346,7 @@ SBOM Artifacts ← For compliance & procurement
 
 **Why These Three Tools?**
 - **Trivy** — Only tool recommended by CISA, Docker Official, Kubernetes, AWS.
-- **Hadolint** — Implements CIS Docker Benchmark (government-aligned standard).
+- **Hadolint** — The de facto Dockerfile linter; its rules overlap substantially with the CIS Docker Benchmark.
 - **Gitleaks** — Built by Zack Rice, widely adopted in enterprise pipelines.
 
 **Why Orchestrate?**
@@ -241,7 +355,7 @@ SBOM Artifacts ← For compliance & procurement
 - Enterprise-grade policy enforcement across all dimensions simultaneously.
 
 **Why SBOM is Mandatory?**
-- U.S. Executive Order 14028 requires for government contracts.
+- U.S. Executive Order 14028 drove the SBOM requirements now common in government contracts.
 - Increasing enterprise compliance requirement (AWS, Google Cloud, Azure all require).
 - SolarWinds/Log4j showed why software inventory matters.
 
@@ -270,16 +384,39 @@ def scan_image(image_ref: str) -> ScanResult:
 
 ## 📦 Installation
 
-### Option 1: Docker (No Local Tool Dependencies)
+### Option 1: Docker (no local tool install)
 
-If you don't want to install trivy/hadolint/gitleaks locally:
+The image bundles pinned builds of Trivy, Hadolint and Gitleaks and runs as a
+non-root user (uid 10001). Build it from the repository root -- the build
+context must include `src/`:
 
 ```bash
 docker build -t security-scanner -f docker/Dockerfile .
-docker run --rm \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v $(pwd)/reports:/reports \
-  security-scanner image myapp:latest
+```
+
+**Scanning an image from a registry** needs no Docker socket at all:
+
+```bash
+docker run --rm -v "$(pwd)/reports:/reports" security-scanner image nginx:1.25
+```
+
+**Scanning an image that exists only in your local Docker daemon** needs access
+to the socket. Because the container runs as a non-root user, it must also join
+the group that owns the socket, or Trivy cannot inspect the image:
+
+```bash
+docker run --rm --group-add "$(stat -c '%g' /var/run/docker.sock)" -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)/reports:/reports" security-scanner image myapp:latest
+```
+
+Without `--group-add`, Trivy reports `permission denied while trying to connect
+to the Docker API`, and the scan **fails** instead of reporting a clean image.
+If you would rather not expose the socket, push the image to a registry and
+scan it by reference.
+
+To lint a Dockerfile or scan a source tree, mount it read-only:
+
+```bash
+docker run --rm -v "$(pwd):/scan-target:ro" -v "$(pwd)/reports:/reports" security-scanner dockerfile /scan-target/Dockerfile
 ```
 
 ### Option 2: Manual Installation (Full Control)
@@ -299,7 +436,7 @@ curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleak
 
 **Step 2: Install Python package**
 ```bash
-git clone https://github.com/yourusername/docker-security-scanner.git
+git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
 cd docker-security-scanner
 pip install -r requirements.txt
 pip install -e .
@@ -380,14 +517,18 @@ docker-scan image myapp:${GITHUB_SHA}
 Many enterprises require SBOMs before using third-party software:
 
 ```bash
-# Generate SBOM for procurement teams
+# Generate SBOMs for procurement teams.
+# An empty --fail-on-severity disables the CVE thresholds, so no CVE count
+# fails the run. Hardcoded secrets and Dockerfile errors still fail, and so
+# does a scanner that could not run -- the gate never opens on no evidence.
 docker-scan image vendorlib:1.0 \
   --output-dir ./compliance \
-  --fail-on-severity NONE # Just generate SBOM, don't fail
+  --fail-on-severity ""
 
-# Outputs:
-# - sbom_vendorlib_1.0_cyclonedx.json (487 components, all versions, licenses)
-# - sbom_vendorlib_1.0_spdx.spdx.json (same data, different format)
+# Outputs (one file per configured SBOM format):
+# - compliance/sbom_vendorlib_1.0_cyclonedx.json
+# - compliance/sbom_vendorlib_1.0_spdx.json
+# Each lists every component with its version, PURL and declared license.
 # 
 # Hand these to procurement → they verify against their blocklist
 # ✅ Approved or ❌ Rejected before integration
@@ -452,69 +593,126 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: '0 2 * * 0'  # Weekly audit
+    - cron: "0 2 * * 0" # Weekly audit
 
 permissions:
   contents: read
-  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      # Pin third-party actions to a commit SHA, not a mutable tag.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Pin every tool version: a scanner whose own inputs drift is not a
+      # reproducible gate.
       - name: Install tools
+        env:
+          TRIVY_VERSION: "0.75.0"
+          HADOLINT_VERSION: "2.12.0"
+          GITLEAKS_VERSION: "8.18.4"
         run: |
-          sudo apt-get install -y trivy
-          curl -sSL https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64 -o /usr/local/bin/hadolint && chmod +x /usr/local/bin/hadolint
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks && sudo mv gitleaks /usr/local/bin/
+          curl -fsSL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          sudo tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
+          sudo curl -fsSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          sudo chmod +x /usr/local/bin/hadolint
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
 
       - name: Run security scan
+        id: scan
+        # continue-on-error so the reports below still upload on a failure.
+        # The gate is re-asserted in the final step.
+        continue-on-error: true
+        env:
+          # Cache the Trivy DB between runs: it dominates the wall clock.
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
         run: |
-          pip install -r requirements.txt && pip install -e .
+          pip install -e .
           docker build -t myapp:latest .
-          
-          # Run scanner, allow continue to upload artifacts
-          docker-scan image myapp:latest --dockerfile ./Dockerfile --output-dir reports/ || echo "SCAN_FAILED=true" >> $GITHUB_ENV
-
-      - name: Comment PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            const summary = fs.readFileSync('reports/security_report.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: summary
-            });
+          docker-scan image myapp:latest \
+            --dockerfile ./Dockerfile \
+            --scan-path . \
+            --output-dir reports/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: security-reports
           path: reports/
+          if-no-files-found: warn
 
-      - name: Enforce Policy
-        if: env.SCAN_FAILED == 'true'
-        run: exit 1
+      # Same-repo PRs only: a pull_request from a fork gets a read-only token
+      # regardless of the permissions block, so this would 403 otherwise.
+      - name: Comment PR
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('reports/security_report.md')) return;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: fs.readFileSync('reports/security_report.md', 'utf8'),
+            });
+
+      - name: Enforce policy
+        if: steps.scan.outcome != 'success'
+        run: |
+          echo "::error::Security policy failed - see the uploaded report."
+          exit 1
 ```
+
+The scanner exits `0` on a pass, `1` on a policy violation (including a scanner
+that could not run) and `2` on a configuration error, so `steps.scan.outcome`
+is all the gate needs.
 
 ### GitHub PR Comment Example
 
 When a PR is opened, developers immediately see what to fix:
 
 ```markdown
-## 🔒 Security Scan Results
+## 🔒 Docker Security Scan — ❌ FAILED
 
-⚠️  CRITICAL ISSUES FOUND
+**Image:** `demo-vulnerable:latest`
 
-CVE Scan: 12 CRITICAL, 47 HIGH
-Dockerfile Lint: 2 errors
-Secrets Detection: 3 found
+### 📊 Summary
+
+| Check | Status | Findings |
+|-------|--------|----------|
+| CVE Scan (Trivy) | ❌ | CRITICAL: 22, HIGH: 379, MEDIUM: 5267, LOW: 518 |
+| Dockerfile Lint (Hadolint) | ❌ | 5 issues (0 error-level) |
+| Secret Detection (Gitleaks) | ❌ | 5 secrets found |
+
+### ❌ Policy Violations
+
+- 22 CRITICAL CVEs (threshold: 0)
+- 379 HIGH CVEs (threshold: 10)
+- 5 hardcoded secrets detected
 
 Action Required:
 1. Update base image
@@ -533,104 +731,179 @@ Adding the `schedule` trigger to the workflow (as shown above) catches retroacti
 
 ---
 
-## 📈 Real-World Impact
+## 📈 The Real-World Problem This Solves
 
-### Quantified Security Improvements
+### Everyone adds a scanner. Almost nobody checks that it still works.
 
-#### Before (Without Scanner)
-```text
-Production Incidents Per Year:
-├─ 2-3 container exploits from known CVEs
-├─ 1 credential breach (leaked AWS keys)
-├─ 4-5 emergency patches (OOB updates)
-├─ $847K in incident response costs (Verizon DBIR 2024 median)
-└─ 6-8 weeks downtime across incidents
+Adding a vulnerability scanner to CI is a solved problem — one step in a YAML
+file. The part nobody checks is the failure mode: **what does the gate report
+when the scanner itself cannot run?**
 
-Compliance Status:
-├─ SBOM? ❌ Manual, outdated, incomplete
-├─ Government contracts? ❌ Unable to bid (SBOM required)
-├─ SOC 2 audit? 🔴 Critical finding
-└─ Vendor risk assessment? 🟡 Unable to provide component list
+A scanner that fails to start finds nothing. "Found nothing" and "found no
+problems" are the same number — zero. If the gate reads only that number, a
+broken scanner and a clean image are indistinguishable, and the pipeline shows
+a green check mark either way.
+
+That green check mark is worse than having no scanner at all. No scanner leaves
+you *aware* that container security is unverified. A scanner that fails open
+leaves you confidently wrong, with an artifact trail that says you checked.
+
+### The bug we found in this project
+
+This repository's own scanner had exactly that bug. Finding it, proving it, and
+fixing it is the engineering story here.
+
+The original policy check counted findings and nothing else:
+
+```python
+# Only ever looked at counts.
+if sev == "CRITICAL" and result.trivy.critical_count > self.config.critical_threshold:
+    violations.append(...)
 ```
 
-#### After (With This Scanner)
-```text
-Production Incidents Per Year:
-├─ 0 container exploits (all CVEs blocked at build time)
-├─ 0 credential breaches (hardcoded secrets caught immediately)
-├─ 0 emergency patches (known vulnerabilities never shipped)
-├─ $0 incident response costs
-└─ 0 downtime due to container vulnerabilities
+`result.trivy.error` was never read. So we pointed the scanner at
+`demo-vulnerable:latest` — an image we had already confirmed carries **22
+CRITICAL CVEs and 5 hardcoded AWS/GitHub credentials** — with the scanning
+tools unavailable:
 
-Compliance Status:
-├─ SBOM? ✅ Automatic, always current, CycloneDX + SPDX
-├─ Government contracts? ✅ Now eligible to bid
-├─ SOC 2 audit? ✅ Artifact-backed evidence
-└─ Vendor risk assessment? ✅ Component inventory provided in 60 seconds
+```console
+$ docker-scan image demo-vulnerable:latest --scan-path examples/vulnerable-app
+
+Step 1/4: Running Trivy CVE scan...
+  ERROR  Trivy scan failed: Required tool 'trivy' not found.
+Step 3/4: Running Gitleaks secret scan...
+  ERROR  Gitleaks scan failed: Required tool 'gitleaks' not found.
+
+✅ Security policy: PASSED
 ```
 
-**ROI Calculation**:
-```text
-Cost Avoidance:
-  - 2-3 exploits @ $847K each = $2.5M prevented
-  - 4-5 emergency patches @ 15 engineer-hours = $60K prevented
-  - Compliance remediation = $120K prevented
-  ─────────────────────────────────────────
-  Total Annual Benefit: $2.68M
+**Zero scans ran. The gate passed.** On an image with 22 critical
+vulnerabilities and five live-looking credentials in it.
 
-Implementation Cost:
-  - Initial setup: 8 engineer-hours = $2K
-  - CI/CD pipeline cost: $0 (runs on existing infrastructure)
-  - Maintenance: 0.5 engineer-hours/month = $2.4K/year
-  ─────────────────────────────────────────
-  Total Annual Cost: $4.4K
+### Why this was not a hypothetical
 
-ROI = $2.68M / $4.4K = **609x return on investment**
+Three separate, ordinary mistakes all reached that same fail-open path — none
+of them requiring an unlucky edge case:
+
+| Trigger | What a user did | What happened |
+|---|---|---|
+| **The project's own setup docs** | `cp .env.example .env`, as `docs/getting-started.md` instructed | That `.env` set `GITLEAKS_CONFIG=.gitleaks.toml` and `HADOLINT_CONFIG=.hadolint.yaml` — **neither file exists in the repo**. Gitleaks exits fatally on an unreadable config. Secret scanning silently stopped running. |
+| **The project's own Docker quickstart** | Ran the `docker run` command from the README | The container runs as uid 10001 but `WORKDIR` was root-owned, so Trivy could not create its relative cache dir: `mkdir .trivy-cache: permission denied`. CVE scanning never started. |
+| **Running on Windows at all** | Installed the tools and ran a scan | Both scanners wrote their JSON to `--output /dev/stdout`, a path that **does not exist on Windows**. Both produced no output on every run. |
+
+Each one produced a confident `✅ PASSED`. The last is the most instructive: the
+scanner was non-functional on an entire operating system, and nothing in the
+output said so.
+
+### Three more defects in the same decision path
+
+Once we were looking at the verdict logic, the rest followed:
+
+- **The verdict contradicted itself three ways in a single run.** Scanning
+  `alpine:3.19` under a CRITICAL-only policy with zero criticals present: the
+  console printed `✅ PASSED`, the JSON report recorded `"passed": false`, and
+  the process exited `1`. Three different answers, three different consumers.
+- **The configured thresholds were decorative.** The exit code came from
+  "zero findings of any severity," so three LOW CVEs in a base image failed the
+  build regardless of `FAIL_ON_SEVERITY` or `CRITICAL_THRESHOLD`. No real image
+  could ever exit `0`, which makes a CI gate permanently red — and a
+  permanently red gate gets switched off.
+- **Dockerfile findings could never fail anything.** Hadolint's results were
+  collected, rendered into all three reports, and then excluded from the policy
+  entirely. A Dockerfile with a hard error-level violation passed.
+
+### What we changed
+
+**One verdict, computed once, before anything reads it.** `evaluate_policy()`
+returns a single `PolicyDecision`, attached to the result *before* any report is
+written. The console, the HTML/JSON/Markdown reports and the exit code all read
+that one object, so they cannot disagree. An unevaluated decision is never a
+pass, so a crash between scanning and reporting cannot read as success.
+
+**The gate fails closed.** Every per-tool result now carries both an `error`
+string and a `ran` flag. Any scanner that did not run is a policy violation that
+names the tool and the reason:
+
+```console
+❌ Security policy: FAILED
+  • scanner did not run (Trivy CVE scan: Required tool 'trivy' not found...)
+  • scanner did not run (Gitleaks secret scan: Required tool 'gitleaks' not found...)
+
+Note: zero findings from a scanner that failed to run is not evidence of a
+clean image.
 ```
 
-### Case Study: Vulnerable Image Detection
+**The policy decides, not the raw counts.** `passed` reflects only the
+configured thresholds, so LOW CVEs in a base image no longer fail a build unless
+you ask them to. A separate `is_clean` flag carries the stricter "nothing at all
+was found" fact, so the two questions stop being confused for each other.
 
-Using the `examples/vulnerable-app` in this repository:
+**And the three triggers are gone at the source:** scanners write to temp files
+instead of `/dev/stdout`, the container sets an absolute writable
+`TRIVY_CACHE_DIR` owned by the runtime user, and `.env.example` no longer points
+at files that do not exist.
 
-```text
-Real CVEs Discovered in Single Dockerfile:
+### Verify the fix yourself
 
-Critical (Immediate RCE):
-├─ CVE-2024-5123 in libssl3 (CVSS 9.8)
-│  └─ Attack: OpenSSL allows arbitrary code execution
-├─ CVE-2024-6387 in openssh-server (CVSS 9.2)
-│  └─ Attack: SSH daemon RCE without authentication
+The regression is pinned by tests that fail if the gate ever opens on no
+evidence again — `tests/test_scanner.py::TestFailClosedPolicy` and
+`tests/test_cli.py::test_image_missing_tool_exits_one_not_zero`:
 
-Hardcoded Secrets (Credential Exposure):
-├─ AWS Access Key ID: AKIA****WXYZ (in .env)
-└─ GitHub PAT: ghs_****ABCD (could deploy to your repos)
-
-Dockerfile Anti-Patterns (Container Escape Vectors):
-├─ No USER instruction (entire image runs as root:0)
-└─ :latest tags (unreproducible builds)
-
-Impact If Deployed:
-└─ Attacker gains: AWS account access, root access to containers, internal network access.
+```bash
+docker build -t security-scanner -f docker/Dockerfile . && docker run --rm -e TRIVY_PATH=/nonexistent security-scanner image alpine:3.19 --no-sbom; echo "exit=$?"
 ```
 
-**The Scanner Caught All of This in 47 Seconds.**
+Before: `✅ Security policy: PASSED`, exit `1` (for an unrelated reason).
+After: `❌ Security policy: FAILED`, exit `1`, naming the tool that did not run.
 
-### Benchmarks vs. Alternative Solutions
+### Measured outcomes
 
-| Aspect | This Scanner | Manual Review | Vulnerability Scanning SaaS | Proprietary Vendor |
-|--------|-------------|---------------|-------------------------------|----------------|
-| **CVEs Found** | 100% | 33% | 100% | 100% |
-| **Time** | 47 sec | 4 hours | 2 min | 90 sec |
-| **Cost** | $0/year | $45K/year | $500K/year | $800K/year |
-| **Learning Curve** | 5 min | N/A | 1 week | 2 weeks |
-| **Secret Detection** | ✅ Yes | ✅ Yes | ❌ No | ✅ Yes |
-| **SBOM Gen** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes |
-| **Maintenance** | OSS community | Internal team | Vendor | Vendor |
-| **Audit Trail** | Git history + artifacts | Email threads | Vendor logs | Proprietary |
+Every number below is reproducible from a clean clone:
 
-*Why you'd choose this scanner: Cost, speed, no vendor lock-in, open source visibility.*
+| | Before | After |
+|---|---|---|
+| Scan with all tools broken | `✅ PASSED` | `❌ FAILED`, names each tool |
+| Verdict consistency | console / report / exit code disagreed | one `PolicyDecision`, all three agree |
+| Can a real image pass? | **No** — any single LOW CVE failed the build | Yes, per the configured policy |
+| Dockerfile errors gate the build | No | Yes |
+| Works on Windows | No — `/dev/stdout`, plus a `UnicodeEncodeError` crash | Yes |
+| CI quality gates passing | **0 of 5** (pipeline had never been green) | **5 of 5** |
+| Tests / coverage | 44 passing, 1 failing, 63% | **272 passing, 96.5%** |
+| `examples/secure-app` | **did not build** (missing `requirements.txt`) | builds; 0 CRITICAL, 0 lint issues, 0 secrets |
+| JSON report (6,186-CVE image) | 8.7 MB, unbounded | 1.6 MB, capped, summary still complete |
+| Docker build context | 237 MB | **380 KB** |
+| Runtime dependencies | 24 (incl. pytest, black, mypy, pylint) | **5** |
+| Secret redaction | `mask_secret("abc")` → `abc[REDACTED]` | fixed-width mask, no plaintext, length hidden |
 
----
+### The transferable lesson
+
+> **A security control that fails open is not a weak control. It is a liability,
+> because it manufactures evidence that the check was performed.**
+
+This is why the gate now treats "the scanner could not run" as a failure rather
+than a quiet zero, why the verdict is computed exactly once, and why
+`FAIL_ON_SCANNER_ERROR` defaults to `true` and has to be switched off
+deliberately. It is the kind of bug that does not announce itself: everything
+is green, the reports render, the artifacts upload, and nothing was ever
+checked.
+
+### How this compares to the alternatives
+
+Honest trade-offs, on properties you can verify rather than vendor pricing:
+
+| | This scanner | Hand-rolled CI steps | Hosted scanning platform |
+|---|---|---|---|
+| **Checks** | CVEs, secrets, Dockerfile lint, SBOM in one pass | whatever you wire up | CVEs + SBOM; secrets vary |
+| **Verdict** | one policy, fails closed, exit code `0`/`1`/`2` | per-step exit codes you must combine yourself | platform policy engine |
+| **Behaviour when a scan breaks** | **fails closed and names the tool** | typically fails open — the usual bug | platform-dependent |
+| **Where findings live** | HTML + JSON + Markdown next to the build | step logs | the vendor's dashboard |
+| **Runs offline / air-gapped** | yes (`TRIVY_SKIP_UPDATE=true`) | yes | no |
+| **Cost** | free; runs on existing CI | free | licensed |
+| **You own the policy** | yes, in `.env` / flags | yes | within what the vendor exposes |
+
+Use a hosted platform if you need fleet-wide dashboards, drift tracking and
+someone to call. Use this if you want a build-time gate you can read end to
+end, run offline, and reason about — including what it does when it breaks.
 
 ## 🖥️ Docker Desktop Demo — Live Test Results
 
@@ -647,10 +920,10 @@ docker build -t security-scanner:latest -f docker/Dockerfile .
 
 # Step 3: Run the full security scan
 docker run --rm \
-  -v //var/run/docker.sock:/var/run/docker.sock \
-  -v "$(pwd)/examples/vulnerable-app:/scan-target" \
+  --group-add "$(stat -c '%g' /var/run/docker.sock)" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$(pwd)/examples/vulnerable-app:/scan-target:ro" \
   -v "$(pwd)/reports:/reports" \
-  --user root \
   security-scanner:latest \
   image vuln-app:latest \
   --dockerfile /scan-target/Dockerfile \
@@ -683,7 +956,7 @@ Step 3/4: Running Gitleaks secret scan on /scan-target...
 
 Step 4/4: Generating SBOM...
   ✓ CYCLONEDX SBOM: /reports/sbom_vuln-app_latest_cyclonedx.json
-  ✓ SPDX SBOM: /reports/sbom_vuln-app_latest_spdx.spdx.json
+  ✓ SPDX SBOM: /reports/sbom_vuln-app_latest_spdx.json
 
 Generating reports...
   ✓ HTML report: /reports/security_report.html
@@ -742,7 +1015,7 @@ CVE-2026-31431 (HIGH · CVSS 7.8)
 | 📋 JSON Structured | `reports/security_report.json` | 1.4 MB | CI/CD integration and automation |
 | 📝 Markdown Summary | `reports/security_report.md` | 782 B | GitHub PR comments |
 | 📦 CycloneDX SBOM | `reports/sbom_vuln-app_latest_cyclonedx.json` | 505 KB | Executive Order 14028 compliance |
-| 📦 SPDX SBOM | `reports/sbom_vuln-app_latest_spdx.spdx.json` | 576 KB | NTIA minimum elements compliance |
+| 📦 SPDX SBOM | `reports/sbom_vuln-app_latest_spdx.json` | 576 KB | NTIA minimum elements compliance |
 
 ### Docker Images Built
 
@@ -762,46 +1035,62 @@ vuln-app             latest   517 MB    ← Deliberately vulnerable test image
 ```text
 docker-security-scanner/
 │
-├── 🎯 src/                          # Core scanning engine
-│   ├── scanner.py                   # Main orchestrator + CLI interface
-│   ├── trivy_scanner.py             # CVE detection module (interface to Trivy)
-│   ├── hadolint_scanner.py          # Dockerfile linting (CIS Benchmark rules)
-│   ├── gitleaks_scanner.py          # Secret detection module
-│   ├── sbom_generator.py            # Software Bill of Materials generation
-│   ├── report_generator.py          # Report generation (HTML, JSON, Markdown)
-│   └── utils.py                     # Shared utilities, logging, config management
+├── 🎯 src/docker_security_scanner/   # Core scanning engine (importable package)
+│   ├── scanner.py                    # Orchestrator, policy engine + CLI
+│   ├── trivy_scanner.py              # CVE detection (Trivy wrapper)
+│   ├── hadolint_scanner.py           # Dockerfile linting (Hadolint wrapper)
+│   ├── gitleaks_scanner.py           # Secret detection (Gitleaks wrapper)
+│   ├── sbom_generator.py             # CycloneDX / SPDX SBOM generation
+│   ├── report_generator.py           # HTML, JSON and Markdown reports
+│   ├── utils.py                      # Config, logging, severity, redaction
+│   └── templates/
+│       └── security_report.html.j2   # HTML dashboard (autoescaped)
 │
-├── ✅ tests/                        # Comprehensive test suite (>85% coverage)
-│   ├── test_scanner.py              # Integration tests for main orchestrator
-│   ├── test_trivy.py                # Unit tests for CVE scanning
-│   ├── test_dockerfile_validation.py# Dockerfile linting validation
-│   └── conftest.py                  # pytest fixtures and mock data
+├── ✅ tests/                         # 269 tests, 96% coverage (85% enforced)
+│   ├── conftest.py                   # Fixtures and realistic tool output
+│   ├── test_scanner.py               # Policy engine, incl. fail-closed tests
+│   ├── test_cli.py                   # Pipeline wiring and exit codes
+│   ├── test_trivy.py                 # CVE parsing
+│   ├── test_dockerfile_validation.py # Hadolint parsing
+│   ├── test_gitleaks.py              # Secret detection and redaction
+│   ├── test_sbom.py                  # SBOM parsing
+│   ├── test_reports.py               # Report escaping and verdict agreement
+│   └── test_utils.py                 # Image refs, config, masking
 │
-├── 📚 examples/                     # Real-world examples
-│   ├── vulnerable-app/              # Intentionally insecure to demonstrate scanning
-│   │   ├── Dockerfile               # ⚠️  Security issues (intentional)
-│   │   └── app.py                   # ⚠️  Hardcoded credentials & flaws
-│   └── secure-app/                  # Hardened version showing best practices
-│       ├── Dockerfile               # ✅ No CVEs, non-root user, optimized
-│       └── app.py                   # ✅ Secure implementation
+├── 📚 examples/                      # Demo targets for the scanner
+│   ├── vulnerable-app/               # Intentionally insecure
+│   │   ├── Dockerfile                # ⚠️  Security issues (intentional)
+│   │   ├── app.py                    # ⚠️  Hardcoded credentials & flaws
+│   │   └── requirements.txt
+│   └── secure-app/                   # Hardened version
+│       ├── Dockerfile                # ✅ Digest-pinned, non-root, multi-stage
+│       ├── app.py                    # ✅ Stdlib only, config from env
+│       └── requirements.txt          # ✅ Intentionally empty
 │
-├── 🐳 docker/                       # Self-contained scanner image
-│   └── Dockerfile                   # Multi-stage build for minimal image
+├── 🐳 docker/                        # Self-contained scanner image
+│   └── Dockerfile                    # Bundles pinned Trivy/Hadolint/Gitleaks
 │
-├── 🚀 .github/workflows/            # Automation
-│   ├── security-scan.yml            # Main CI/CD workflow
-│   └── badge-update.yml             # Updates README badges
+├── 🚀 .github/
+│   ├── workflows/
+│   │   ├── security-scan.yml         # Lint, test, image build, scan
+│   │   └── badge-update.yml          # Reports the latest scan conclusion
+│   └── dependabot.yml                # Keeps the pinned action SHAs current
 │
-├── 📖 docs/                         # Comprehensive documentation
-│   ├── getting-started.md           # Step-by-step walkthrough
-│   ├── configuration.md             # All settings, environment variables
-│   ├── output-formats.md            # Report schemas, JSON structure
-│   └── troubleshooting.md           # Common issues and fixes
+├── 📖 docs/
+│   ├── getting-started.md            # Step-by-step walkthrough
+│   ├── configuration.md             # All settings and environment variables
+│   ├── output-formats.md             # Report schemas, JSON structure
+│   └── troubleshooting.md            # Common issues and fixes
 │
-├── 📋 ARCHITECTURE.md               # System design, component interactions
-├── 🔐 SECURITY.md                   # Security policy, disclosure
-├── 🤝 CONTRIBUTING.md               # Development guide, PR process
-└── 📄 README.md                     # This file
+├── ⚙️  pyproject.toml                # black, isort, mypy, pytest, coverage
+├── ⚙️  .flake8                       # flake8 (cannot read pyproject.toml)
+├── ⚙️  .dockerignore                 # Keeps the build context small
+├── 📦 requirements.txt               # 5 runtime dependencies
+├── 📦 requirements-dev.txt           # Test and lint tooling
+├── 📋 ARCHITECTURE.md                # System design, component interactions
+├── 🔐 SECURITY.md                    # Security policy, disclosure
+├── 🤝 CONTRIBUTING.md                # Development guide, PR process
+└── 📄 README.md                      # This file
 ```
 
 ---
@@ -814,10 +1103,15 @@ docker-security-scanner/
 |----------|-----------------|------------------|
 | **EO 14028** (U.S. Gov) | Software Bill of Materials | ✅ Generates CycloneDX & SPDX SBOM |
 | **NIST SP 800-190** | Vulnerability scanning | ✅ Trivy + Hadolint integrated |
-| **CIS Docker Benchmark** | Configuration security | ✅ Hadolint implements all 50+ rules |
+| **CIS Docker Benchmark** | Configuration security | ⚠️ Partial — Hadolint's rules overlap but are not a full implementation |
 | **OWASP Top 10 for Docker**| CVE detection + secrets | ✅ Trivy + Gitleaks coverage |
 | **SOC 2 Type II** | Evidence of controls | ✅ Automated reports with timestamps |
 | **ISO 27001** | Info security management | ✅ Audit trail via GitHub Actions |
+
+> **What this column means.** Each row describes evidence this scanner can
+> *contribute* to an assessment, not a certification it confers. Running the
+> tool does not make you compliant with any of these standards; it produces
+> artifacts an assessor will ask for.
 
 ### Enterprise Audit Readiness
 
@@ -844,7 +1138,7 @@ We welcome contributions from everyone — security engineers, DevOps practition
 git checkout -b feat/new-integration
 
 # 2. Make changes + run tests locally
-pytest tests/ --cov=src --cov-fail-under=85
+pytest tests/ --cov --cov-fail-under=85
 
 # 3. Format & lint
 black src/ tests/
@@ -862,36 +1156,42 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines, code quality standar
 
 ### Quality Metrics
 
-| Metric | Status | Target |
-|--------|--------|--------|
-| **Test Coverage** | 87% | ≥85% ✅ |
-| **Code Quality** | A | A+ |
-| **Build Status** | Passing | Always ✅ |
-| **Type Hint Coverage** | 100% | 100% ✅ |
+| Metric | Status | Enforced by |
+|--------|--------|-------------|
+| **Test coverage** | 96% (269 tests) | `pytest --cov-fail-under=85` |
+| **Formatting** | clean | `black --check` |
+| **Import order** | clean | `isort --check-only` |
+| **Lint** | clean | `flake8` |
+| **Type check** | clean | `mypy src/` |
 
-### Performance Metrics
+Every row is a CI step that fails the build, and all five read their settings
+from `pyproject.toml` / `.flake8`, so a local run and a CI run cannot disagree.
+
+### Performance
+
+Wall-clock time is dominated by Trivy's vulnerability-database download on a
+cold cache and by image size, not by this scanner. For reference, on a warm
+cache:
 
 ```text
-Average Scan Time:
-├─ Small image (10 layers): 12 seconds
-├─ Medium image (25 layers): 47 seconds
-└─ Large image (50 layers): 180 seconds
-
-Memory Usage:
-├─ Idle: 45 MB
-└─ During scan: 180 MB (peak)
+alpine:3.19  (1 layer,  10 CVEs)    ~25 s  including DB check
+ubuntu-based (5 layers, 6186 CVEs)  ~70 s  including both SBOMs
 ```
+
+Set `TRIVY_CACHE_DIR` to a persistent, writable path and cache it between CI
+runs — that is the single biggest win. `TRIVY_SKIP_UPDATE=true` skips the
+database refresh entirely for air-gapped runs.
 
 ---
 
 ## 🚀 Get Started Now
 
 ### Option 1: Integrate Into Your Pipeline
-See [GitHub Actions Integration](#-github-actions-integration) above.
+See [GitHub Actions Integration](#-github-actions-integration--automated-security-gates) above.
 
 ### Option 2: Learn From Examples
 ```bash
-git clone https://github.com/yourusername/docker-security-scanner.git
+git clone https://github.com/Vaibhav27072004/docker-security-scanner.git
 cd docker-security-scanner/examples
 # See what bad looks like
 docker build -t vuln-app:latest vulnerable-app/
@@ -916,7 +1216,7 @@ docker-scan image vuln-app:latest
 
 This project stands on the shoulders of giants:
 - **Trivy** — CVE database by Aqua Security, trusted by Docker, Kubernetes, AWS
-- **Hadolint** — CIS Docker Benchmark implementation
+- **Hadolint** — Dockerfile linter
 - **Gitleaks** — Secret scanning by Zack Rice, adopted enterprise-wide
 - **CycloneDX** — SBOM standard maintained by OWASP
 

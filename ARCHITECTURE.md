@@ -41,25 +41,45 @@ Docker Security Scanner is a **pipeline-based, multi-tool security orchestrator*
 
 ## Component Descriptions
 
-### `src/scanner.py` — Orchestrator
+### `src/docker_security_scanner/scanner.py` — Orchestrator
 The central coordinator. Responsible for:
 - Accepting user input (image reference, paths, configuration)
 - Invoking each scanner in the correct order
 - Aggregating results into `AggregatedResult`
-- Running policy checks and raising `PolicyViolationError`
+- Evaluating the security policy into a single `PolicyDecision`
 - Coordinating report generation
 - Providing the Click-based CLI
+
+**Design decision — one verdict, computed once.** `evaluate_policy()` is the
+only place a pass/fail decision is made. It returns a `PolicyDecision`, which is
+attached to the `AggregatedResult` *before* any report is written, and the
+console output, the HTML/JSON/Markdown reports and the process exit code all
+read that one object. Nothing else is allowed to form an opinion, which is what
+makes it impossible for the console to say PASSED while the report says failed.
+
+**Design decision — the gate fails closed.** Each per-tool result carries both
+an `error` string and a `ran` property. `evaluate_policy()` treats *any*
+`ran == False` as a violation when `FAIL_ON_SCANNER_ERROR` is enabled (the
+default), because a scanner that could not start reports zero findings and zero
+findings would otherwise be indistinguishable from a clean image. An operator
+can opt out, but they have to say so explicitly.
+
+**Design decision — `passed` is the policy, `is_clean` is the facts.**
+`AggregatedResult.passed` reflects only the configured policy, so a LOW CVE in a
+base image does not fail a build unless asked. `is_clean` is the separate,
+stricter "nothing at all was found" flag. An unevaluated `PolicyDecision` is
+never a pass, so a crash between scanning and reporting cannot read as success.
 
 **Design decision:** Scanners run **sequentially** rather than in parallel. This ensures deterministic output ordering and avoids resource contention when scanning large images, while keeping the codebase simple. Parallelism can be added later with `concurrent.futures`.
 
 ---
 
-### `src/trivy_scanner.py` — CVE Detection
+### `src/docker_security_scanner/trivy_scanner.py` — CVE Detection
 Wraps the [Trivy](https://trivy.dev) CLI.
 
 **Data flow:**
 ```
-trivy image --format json <image>
+trivy image --format json --output <tmpfile> <image>
      ↓
 TrivyScanner._parse_output()
      ↓
@@ -70,12 +90,17 @@ TrivyScanResult
 
 **Key design choices:**
 - Uses `--exit-code 0` so Trivy never fails the subprocess; policy is enforced by our scanner
+- Writes the JSON report to a **temporary file**, not `/dev/stdout`. There is no
+  such path on Windows, so the previous approach silently produced no output —
+  and no output used to look like no findings.
 - Extracts CVSS v3 scores from multiple sources (NVD → RedHat → GHSA fallback)
 - Sorts vulnerabilities by severity then CVSS score for report readability
+- Distinguishes "ran and found nothing" from "could not run": an empty or
+  unparseable report sets `error`, which the policy then treats as a violation
 
 ---
 
-### `src/hadolint_scanner.py` — Dockerfile Linting
+### `src/docker_security_scanner/hadolint_scanner.py` — Dockerfile Linting
 Wraps [Hadolint](https://github.com/hadolint/hadolint).
 
 **Checks performed:**
@@ -88,7 +113,7 @@ Wraps [Hadolint](https://github.com/hadolint/hadolint).
 
 ---
 
-### `src/gitleaks_scanner.py` — Secret Detection
+### `src/docker_security_scanner/gitleaks_scanner.py` — Secret Detection
 Wraps [Gitleaks](https://gitleaks.io) in `--no-git` filesystem scan mode.
 
 **Secret categories detected:**
@@ -100,14 +125,14 @@ Wraps [Gitleaks](https://gitleaks.io) in `--no-git` filesystem scan mode.
 
 ---
 
-### `src/sbom_generator.py` — SBOM Generation
+### `src/docker_security_scanner/sbom_generator.py` — SBOM Generation
 Uses Trivy's SBOM output modes to generate:
 - **CycloneDX JSON** — for compliance tooling and EO 14028
 - **SPDX JSON** — for license auditing and NTIA minimum elements
 
 ---
 
-### `src/report_generator.py` — Report Generation
+### `src/docker_security_scanner/report_generator.py` — Report Generation
 Generates reports without external template files (inline Jinja2 template).
 
 **Report formats:**
@@ -119,7 +144,7 @@ Generates reports without external template files (inline Jinja2 template).
 
 ---
 
-### `src/utils.py` — Shared Utilities
+### `src/docker_security_scanner/utils.py` — Shared Utilities
 - `ScannerConfig` — Pydantic v2 model with env var loading
 - `ImageRef` — parsed Docker image reference
 - Custom exception hierarchy (`ScannerError` → specialisations)

@@ -156,6 +156,51 @@ The vulnerable app is intentionally insecure. The workflow is configured to
 
 ## Getting Help
 
-- 📋 [Open an Issue](https://github.com/yourusername/docker-security-scanner/issues)
+## The scan says a tool "did not run"
+
+```
+❌ Security policy: FAILED
+  • scanner did not run (Trivy CVE scan: Required tool 'trivy' not found...)
+```
+
+This is the gate working as designed. A scanner that could not run reports zero
+findings, and zero findings from a tool that never started is not evidence of a
+clean image, so it is treated as a policy violation rather than a pass.
+
+Common causes:
+
+| Message | Cause | Fix |
+|---------|-------|-----|
+| `Required tool 'X' not found` | binary not on `PATH` | install it, or set `TRIVY_PATH` / `HADOLINT_PATH` / `GITLEAKS_PATH` |
+| `unable to load gitleaks config` | `GITLEAKS_CONFIG` points at a missing file | leave it blank, or create the file |
+| `.hadolint.yaml: does not exist` | `HADOLINT_CONFIG` points at a missing file | leave it blank, or create the file |
+| `mkdir .trivy-cache: permission denied` | `TRIVY_CACHE_DIR` is not writable | set it to an absolute writable path |
+
+---
+
+## `permission denied while trying to connect to the Docker API`
+
+The scanner container runs as a non-root user (uid 10001), so it is not in the
+group that owns `/var/run/docker.sock`. Trivy therefore cannot inspect an image
+that exists only in your local daemon.
+
+```bash
+docker run --rm --group-add "$(stat -c '%g' /var/run/docker.sock)" -v /var/run/docker.sock:/var/run/docker.sock -v "$(pwd)/reports:/reports" security-scanner image myapp:latest
+```
+
+Images pulled from a registry need no socket access at all, so pushing the image
+and scanning it by reference avoids the problem entirely.
+
+---
+
+## The scan exits 1 but the policy passed
+
+It no longer can. The console verdict, all three report formats and the exit
+code are read from the same `PolicyDecision`. If you see them disagree, that is
+a bug worth reporting.
+
+---
+
+- 📋 [Open an Issue](https://github.com/Vaibhav27072004/docker-security-scanner/issues)
 - 📖 [Architecture Docs](../ARCHITECTURE.md)
-- 💬 [Discussions](https://github.com/yourusername/docker-security-scanner/discussions)
+- 💬 [Discussions](https://github.com/Vaibhav27072004/docker-security-scanner/discussions)
