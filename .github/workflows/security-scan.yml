@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       image_ref:
-        description: "Docker image to scan (e.g. nginx:1.25)"
+        description: "Extra image to scan in addition to the examples (e.g. nginx:1.25)"
         required: false
         default: ""
       fail_on_severity:
@@ -19,217 +19,411 @@ on:
     # Daily scan at 02:00 UTC
     - cron: "0 2 * * *"
 
+# Least privilege at the top level; jobs opt in to more where they need it.
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
-  security-events: write
+
+# Supersede in-progress runs for the same ref instead of running them twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_DEFAULT: "3.11"
 
 jobs:
   # ─── Lint & Static Analysis ─────────────────────────────────────────────────
   lint:
     name: 🧹 Lint & Type Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_DEFAULT }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install black flake8 pylint mypy isort
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          pip install -e .
 
+      # All four tools read their settings from pyproject.toml / .flake8, so a
+      # local run and a CI run cannot disagree. No settings on the command line.
       - name: Check formatting (Black)
-        run: black --check --diff src/ tests/
-
-      - name: Lint with flake8
-        run: flake8 src/ tests/ --max-line-length=100 --extend-ignore=E203
+        run: black --check --diff src/ tests/ setup.py
 
       - name: Sort imports check (isort)
-        run: isort --check-only src/ tests/
+        run: isort --check-only --diff src/ tests/ setup.py
+
+      - name: Lint with flake8
+        run: flake8 src/ tests/ setup.py
 
       - name: Type check (mypy)
-        run: mypy src/ --ignore-missing-imports --no-strict-optional
+        run: mypy src/
 
   # ─── Unit Tests ─────────────────────────────────────────────────────────────
   test:
     name: 🧪 Test Suite (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # Python 3.9 is end-of-life and current click/pydantic/python-dotenv
+        # all require >= 3.10, so it is no longer supported.
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+          # Installing the package also validates the packaging metadata.
+          pip install -e .
+
+      - name: Verify the console script is installed
+        run: docker-scan --version
 
       - name: Run tests with coverage
         run: |
           pytest tests/ \
-            --cov=src \
+            --cov \
             --cov-report=xml \
             --cov-report=term-missing \
             --cov-fail-under=85 \
             -v
 
       - name: Upload coverage report
-        uses: codecov/codecov-action@v4
         if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
         with:
-          file: coverage.xml
+          # v4+ renamed this input from "file" to "files"; the old name was
+          # silently ignored.
+          files: coverage.xml
           fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ─── Scanner container image ────────────────────────────────────────────────
+  # The shipped image was never built in CI, so a broken Dockerfile reached main.
+  build-scanner-image:
+    name: 🐳 Build Scanner Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build scanner image
+        run: docker build -t security-scanner:ci -f docker/Dockerfile .
+
+      - name: Verify bundled tools and entrypoint
+        run: |
+          docker run --rm --entrypoint sh security-scanner:ci -c '
+            set -eux
+            trivy --version
+            hadolint --version
+            gitleaks version
+          '
+          docker run --rm security-scanner:ci --version
+
+      - name: Verify the image runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id security-scanner:ci -u)"
+          echo "container uid: ${uid}"
+          test "${uid}" != "0"
+
+      - name: Verify the Trivy cache directory is writable by that user
+        run: |
+          docker run --rm --entrypoint sh security-scanner:ci -c '
+            set -eux
+            test -w "${TRIVY_CACHE_DIR}"
+          '
 
   # ─── Security Scan ──────────────────────────────────────────────────────────
   security-scan:
-    name: 🔍 Security Scan — ${{ matrix.target }}
+    name: 🔍 Security Scan — ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint, test]
+    # pull-requests: write is needed to post the report comment. GitHub grants
+    # it only for same-repo pull requests; the comment step is gated on that.
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - examples/vulnerable-app
-          - examples/secure-app
+        include:
+          - name: vulnerable
+            target: examples/vulnerable-app
+            image: demo-vulnerable:latest
+            # Deliberately insecure: the scanner MUST find secrets and
+            # Dockerfile problems here, and the gate must fail.
+            expect: fail
+          - name: secure
+            target: examples/secure-app
+            image: demo-secure:latest
+            # Demonstrates Dockerfile best practice: no secrets, no
+            # error-level lint findings. Base-image CVE counts are reported
+            # but NOT asserted — they grow with time, not with this repo, so
+            # asserting on them would turn CI red for unrelated reasons.
+            expect: pass
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_DEFAULT }}
           cache: pip
+          cache-dependency-path: requirements.txt
 
-      - name: Install scanner dependencies
+      - name: Install scanner
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
           pip install -e .
 
-      # ── Install Trivy ──────────────────────────────────────────────────────
+      # ── Install the three scanning tools (pinned) ──────────────────────────
       - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.75.0"
         run: |
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
-            gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | \
-            sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -q
-          sudo apt-get install -y trivy
+          curl -fsSL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          sudo tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
           trivy --version
 
-      # ── Install Hadolint ───────────────────────────────────────────────────
       - name: Install Hadolint
+        env:
+          HADOLINT_VERSION: "2.12.0"
         run: |
-          HADOLINT_VERSION="v2.12.0"
-          sudo curl -sSL \
-            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
+          sudo curl -fsSL \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
             -o /usr/local/bin/hadolint
           sudo chmod +x /usr/local/bin/hadolint
           hadolint --version
 
-      # ── Install Gitleaks ───────────────────────────────────────────────────
       - name: Install Gitleaks
+        env:
+          GITLEAKS_VERSION: "8.18.4"
         run: |
-          GITLEAKS_VERSION="v8.18.4"
-          curl -sSL \
-            "https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION#v}_linux_x64.tar.gz" \
+          curl -fsSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz gitleaks
           sudo mv gitleaks /usr/local/bin/
           gitleaks version
 
-      # ── Build the example Docker image ────────────────────────────────────
+      # ── Build the example image ───────────────────────────────────────────
       - name: Build Docker image
-        id: docker_build
-        run: |
-          IMAGE_TAG="${{ matrix.target == 'examples/vulnerable-app' && 'demo-vulnerable:latest' || 'demo-secure:latest' }}"
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          docker build -t "${IMAGE_TAG}" ${{ matrix.target }}
+        run: docker build -t "${{ matrix.image }}" "${{ matrix.target }}"
 
       # ── Run the Security Scanner ──────────────────────────────────────────
+      # continue-on-error so the reports still upload; the gate step below
+      # asserts the outcome matches what this image is supposed to do.
       - name: Run Docker Security Scanner
         id: scan
         continue-on-error: true
         env:
-          FAIL_ON_SEVERITY: ${{ github.event.inputs.fail_on_severity || 'CRITICAL,HIGH' }}
+          FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity || 'CRITICAL,HIGH' }}
           REPORT_OUTPUT_DIR: reports
           REPORT_FORMATS: html,json,markdown
           SBOM_FORMATS: cyclonedx,spdx
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
           LOG_LEVEL: INFO
         run: |
-          python -m src.scanner image \
-            "${{ steps.docker_build.outputs.image_tag }}" \
+          docker-scan image "${{ matrix.image }}" \
             --dockerfile "${{ matrix.target }}/Dockerfile" \
             --scan-path "${{ matrix.target }}" \
             --output-dir reports
 
-      # ── Post Markdown summary as PR comment ───────────────────────────────
+      # ── Optional extra image from workflow_dispatch ───────────────────────
+      # The image_ref input used to be declared and then ignored entirely.
+      - name: Scan the requested extra image
+        if: inputs.image_ref != ''
+        continue-on-error: true
+        env:
+          FAIL_ON_SEVERITY: ${{ inputs.fail_on_severity || 'CRITICAL,HIGH' }}
+          TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+          EXTRA_IMAGE: ${{ inputs.image_ref }}
+        run: |
+          docker pull "$EXTRA_IMAGE"
+          docker-scan image "$EXTRA_IMAGE" --output-dir reports-extra
+
+      # ── Upload reports as artifacts ───────────────────────────────────────
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-reports-${{ matrix.name }}
+          path: |
+            reports/
+            reports-extra/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ── Post Markdown summary as a PR comment ─────────────────────────────
+      # Only on same-repo PRs: a pull_request from a fork gets a read-only
+      # GITHUB_TOKEN regardless of the permissions block, so this step used to
+      # fail the whole job with a 403 on every external contribution.
       - name: Post scan results to PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          MATRIX_NAME: ${{ matrix.name }}
+          MATRIX_IMAGE: ${{ matrix.image }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const reportPath = 'reports/security_report.md';
-            if (fs.existsSync(reportPath)) {
-              const body = fs.readFileSync(reportPath, 'utf8');
-              const header = `## Security Scan Results — \`${{ matrix.target }}\`\n\n`;
+            if (!fs.existsSync(reportPath)) {
+              core.info('No markdown report was produced; nothing to post.');
+              return;
+            }
+            const name = process.env.MATRIX_NAME;
+            const image = process.env.MATRIX_IMAGE;
+            // Stable marker so each run edits its own comment instead of
+            // adding a new one every time the PR is pushed to.
+            const marker = `<!-- docker-security-scanner:${name} -->`;
+            const body = [
+              marker,
+              `## Security Scan Results — \`${image}\``,
+              '',
+              fs.readFileSync(reportPath, 'utf8'),
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const existing = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number },
+            );
+            const mine = existing.find((c) => c.body && c.body.includes(marker));
+
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: mine.id, body,
+              });
+            } else {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: header + body,
+                owner, repo, issue_number, body,
               });
             }
 
-      # ── Upload reports as artifacts ───────────────────────────────────────
-      - name: Upload security reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-reports-${{ matrix.target == 'examples/vulnerable-app' && 'vulnerable' || 'secure' }}
-          path: reports/
-          retention-days: 30
-
-      # ── Fail the job based on scan result ────────────────────────────────
-      - name: Enforce security gate
-        if: steps.scan.outcome == 'failure' && matrix.target == 'examples/secure-app'
+      # ── Assert the scanner behaved as this image requires ─────────────────
+      # Asserts on the structured report rather than only the exit code, and
+      # deliberately does NOT assert base-image CVE counts: those change with
+      # upstream advisories, not with this repository.
+      - name: Assert scanner behaviour
+        env:
+          EXPECT: ${{ matrix.expect }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
         run: |
-          echo "❌ Security gate failed for production image!"
-          exit 1
+          python - <<'PY'
+          import json, os, pathlib, sys
+
+          expect = os.environ["EXPECT"]
+          outcome = os.environ["SCAN_OUTCOME"]
+          report = pathlib.Path("reports/security_report.json")
+
+          if not report.is_file():
+              sys.exit("::error::No JSON report was produced; the scan did not complete.")
+
+          data = json.loads(report.read_text(encoding="utf-8"))
+          trivy, hadolint, gitleaks = data["trivy"], data["hadolint"], data["gitleaks"]
+          policy = data["policy"]
+          failures = []
+
+          print(f"scan outcome      : {outcome} (expected: {expect})")
+          print(f"policy passed     : {data['passed']}")
+          print(f"policy violations : {policy['violations']}")
+          print(f"CVEs              : {trivy['summary']}")
+          print(f"dockerfile issues : {hadolint['summary']}")
+          print(f"secrets           : {gitleaks['summary']}")
+
+          # Every scanner must actually have run, whatever the verdict.
+          if policy["scanner_errors"]:
+              failures.append(f"scanners failed to run: {policy['scanner_errors']}")
+          for name, section in (("trivy", trivy), ("hadolint", hadolint), ("gitleaks", gitleaks)):
+              if not section["ran"]:
+                  failures.append(f"{name} did not run: {section['error']}")
+
+          if expect == "fail":
+              # The vulnerable demo must actually be caught.
+              if data["passed"]:
+                  failures.append("the deliberately vulnerable image PASSED the gate")
+              if gitleaks["summary"]["total"] == 0:
+                  failures.append("no hardcoded secrets detected in the vulnerable app")
+              if hadolint["summary"]["total"] == 0:
+                  failures.append("no Dockerfile issues detected in the vulnerable app")
+          else:
+              # The secure demo must be clean in the ways its Dockerfile controls.
+              if gitleaks["summary"]["total"] != 0:
+                  failures.append(f"secrets found in the secure app: {gitleaks['summary']}")
+              if hadolint["summary"]["errors"] != 0:
+                  failures.append(f"Dockerfile errors in the secure app: {hadolint['summary']}")
+
+          if failures:
+              for f in failures:
+                  print(f"::error::{f}")
+              sys.exit(1)
+          print("Scanner behaved as expected.")
+          PY
 
   # ─── Summary ────────────────────────────────────────────────────────────────
   summary:
     name: 📋 Workflow Summary
     runs-on: ubuntu-latest
-    needs: [lint, test, security-scan]
+    timeout-minutes: 5
+    needs: [lint, test, build-scanner-image, security-scan]
     if: always()
     steps:
       - name: Generate workflow summary
         run: |
-          echo "## 🔒 Docker Security Scanner — Workflow Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Lint & Type Check | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Test Suite | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Security Scan | ${{ needs.security-scan.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Scan triggered by: **${{ github.event_name }}** on \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🔒 Docker Security Scanner — Workflow Summary"
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| Lint & Type Check | ${{ needs.lint.result }} |"
+            echo "| Test Suite | ${{ needs.test.result }} |"
+            echo "| Scanner Image Build | ${{ needs.build-scanner-image.result }} |"
+            echo "| Security Scan | ${{ needs.security-scan.result }} |"
+            echo ""
+            echo "Triggered by **${{ github.event_name }}** on \`${{ github.ref_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail the workflow if any job failed
+        if: >-
+          needs.lint.result != 'success' ||
+          needs.test.result != 'success' ||
+          needs.build-scanner-image.result != 'success' ||
+          needs.security-scan.result != 'success'
+        run: |
+          echo "::error::One or more jobs did not succeed."
+          exit 1

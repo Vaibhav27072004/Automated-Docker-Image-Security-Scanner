@@ -1,24 +1,48 @@
-name: 🏷️ Update Status Badges
+name: 🏷️ Scan Status Summary
+
+# The previous version of this workflow requested `contents: write` and then
+# only echoed a line into the step summary — it never updated a badge. The
+# README badges are served directly by GitHub's own workflow-status endpoint
+# and need no job at all, so this workflow now only reports the latest result
+# and asks for no write access.
 
 on:
   workflow_run:
     workflows: ["🔒 Docker Security Scan"]
     types: [completed]
-  schedule:
-    - cron: "0 6 * * 1"  # Every Monday at 06:00 UTC
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.id }}
+  cancel-in-progress: true
 
 jobs:
-  update-badges:
-    name: Refresh README badges
+  report:
+    name: Report latest scan status
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Write badge status
+      - name: Write scan status to the run summary
+        env:
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
         run: |
-          STATUS="${{ github.event.workflow_run.conclusion || 'passing' }}"
-          echo "Last scan: ${STATUS}" >> $GITHUB_STEP_SUMMARY
+          case "${CONCLUSION}" in
+            success)   icon="✅" ;;
+            failure)   icon="❌" ;;
+            cancelled) icon="⚪" ;;
+            *)         icon="⚠️" ;;
+          esac
+          {
+            echo "## ${icon} Latest security scan: ${CONCLUSION}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Branch | \`${HEAD_BRANCH}\` |"
+            echo "| Run | [#${RUN_NUMBER}](${RUN_URL}) |"
+            echo "| Conclusion | ${CONCLUSION} |"
+          } >> "$GITHUB_STEP_SUMMARY"
