@@ -3,9 +3,11 @@
 # This demonstrates the corrected, secure version after scanner remediation.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ✅ Fix 1: Use a specific, pinned base image with digest for reproducibility
+# ✅ Fix 1: Pin the base image by DIGEST, not just by tag. A tag can be
+#          repointed at new content; a digest cannot, so the build is
+#          reproducible and cannot be swapped underneath you.
 # ✅ Fix 2: Multi-stage build — builder stage for dependencies
-FROM python:3.11.9-slim AS builder
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS builder
 
 # Set working directory
 WORKDIR /build
@@ -19,7 +21,7 @@ RUN pip install --no-cache-dir --upgrade pip==24.0 \
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Final production stage — minimal image
-FROM python:3.11.9-slim
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 # ✅ Fix 5: Create a non-root user and group
 RUN groupadd --gid 10001 appgroup \
@@ -28,7 +30,7 @@ RUN groupadd --gid 10001 appgroup \
 WORKDIR /app
 
 # ✅ Fix 6: Copy only the installed packages from builder (not the whole system)
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # ✅ Fix 7: Copy only application source (not the entire context)

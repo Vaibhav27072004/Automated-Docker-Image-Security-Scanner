@@ -1,0 +1,14 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Secure App — Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+# Intentionally EMPTY. app.py uses only the Python standard library
+# (http.server, logging, os, signal, sys), which is itself a security control:
+# zero third-party packages means zero third-party CVEs and no supply chain.
+#
+# This file must exist even while empty, because the Dockerfile copies it in a
+# dedicated early layer so dependency installs stay cached independently of
+# application source changes. Add pinned requirements below if that changes:
+#
+#   flask==3.0.3
+#
+# Always pin exact versions (==) here, never ranges.
