@@ -7,7 +7,7 @@
 #   docker build -t security-scanner -f docker/Dockerfile .
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.11.9-slim AS base
+FROM python:3.14.8-slim AS base
 
 # ── Tool versions ─────────────────────────────────────────────────────────────
 # All three are pinned and all three are actually used. TRIVY_VERSION used to be
